@@ -95,6 +95,37 @@ struct VaultConfigContent {
     areas: AreasConfigContent,
     #[serde(skip_serializing_if = "DayPlannerConfigContent::is_unset")]
     day_planner: DayPlannerConfigContent,
+    #[serde(skip_serializing_if = "AgentConfigContent::is_unset")]
+    agent: AgentConfigContent,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct AgentConfigContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+}
+
+impl AgentConfigContent {
+    fn resolve(self) -> AgentConfig {
+        AgentConfig {
+            command: self
+                .command
+                .filter(|command| !command.trim().is_empty()),
+        }
+    }
+
+    fn is_unset(&self) -> bool {
+        self.command.is_none()
+    }
+}
+
+/// The `[agent]` table: this vault's launch-command override for the user's
+/// CLI agent. When absent, the user-level default applies (see
+/// `crate::agent`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentConfig {
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -254,6 +285,10 @@ struct InstalledAreaContent {
     enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    onboarding_installed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    onboarding_state: Option<String>,
 }
 
 impl InstalledAreaContent {
@@ -262,6 +297,53 @@ impl InstalledAreaContent {
             id: self.id,
             enabled: self.enabled.unwrap_or(true),
             version: self.version.unwrap_or(1),
+            onboarding_installed_at: self
+                .onboarding_installed_at
+                .as_deref()
+                .and_then(|raw| match chrono::DateTime::parse_from_rfc3339(raw) {
+                    Ok(timestamp) => Some(timestamp.with_timezone(&chrono::Utc)),
+                    Err(error) => {
+                        log::warn!(
+                            "BreadPaper: invalid onboarding_installed_at {raw:?} in \
+                             config.toml: {error}"
+                        );
+                        None
+                    }
+                }),
+            onboarding_state: match self.onboarding_state.as_deref() {
+                None => None,
+                Some("pending") => Some(OnboardingState::Pending),
+                Some("onboarded") => Some(OnboardingState::Onboarded),
+                Some("expired") => Some(OnboardingState::Expired),
+                Some(other) => {
+                    log::warn!(
+                        "BreadPaper: unknown onboarding_state {other:?} in config.toml; \
+                         treating the Area as expired"
+                    );
+                    Some(OnboardingState::Expired)
+                }
+            },
+        }
+    }
+}
+
+/// Where an installed Area stands in the agentic-onboarding flow (V5 §7.4).
+/// `None` on an entry means the Area was installed before V5 (or scaffolded
+/// rather than added), which the UI treats like `Expired`: the quiet
+/// "Set up with AI" action only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OnboardingState {
+    Pending,
+    Onboarded,
+    Expired,
+}
+
+impl OnboardingState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Onboarded => "onboarded",
+            Self::Expired => "expired",
         }
     }
 }
@@ -278,14 +360,30 @@ pub struct InstalledArea {
     pub id: String,
     pub enabled: bool,
     pub version: u32,
+    pub onboarding_installed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub onboarding_state: Option<OnboardingState>,
 }
 
 impl InstalledArea {
+    pub fn new(id: String, enabled: bool, version: u32) -> Self {
+        Self {
+            id,
+            enabled,
+            version,
+            onboarding_installed_at: None,
+            onboarding_state: None,
+        }
+    }
+
     fn into_content(self) -> InstalledAreaContent {
         InstalledAreaContent {
             id: self.id,
             enabled: Some(self.enabled),
             version: Some(self.version),
+            onboarding_installed_at: self
+                .onboarding_installed_at
+                .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            onboarding_state: self.onboarding_state.map(|state| state.as_str().to_string()),
         }
     }
 }
@@ -314,6 +412,7 @@ pub struct VaultConfig {
     pub history: HistoryConfig,
     pub areas: AreasConfig,
     pub day_planner: DayPlannerConfig,
+    pub agent: AgentConfig,
 }
 
 impl Default for VaultConfig {
@@ -331,6 +430,7 @@ impl VaultConfigContent {
             history: self.history.resolve(),
             areas: self.areas.resolve(),
             day_planner: self.day_planner.resolve(),
+            agent: self.agent.resolve(),
         }
     }
 }
@@ -441,6 +541,19 @@ pub(crate) fn write_if_missing(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Serializes the read-modify-write config rewrites below. They run on
+/// arbitrary background threads (user actions racing the onboarding watcher),
+/// and two interleaved rewrites would silently drop one side's change.
+static CONFIG_REWRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_config_rewrites() -> std::sync::MutexGuard<'static, ()> {
+    // The guarded data is `()`, so a panic while holding the lock can't have
+    // left anything inconsistent — recover instead of poisoning forever.
+    CONFIG_REWRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Rewrites `.breadpaper/config.toml` with `mutate` applied to the
 /// `[[areas.installed]]` registry. Re-serializes the known config schema, so
 /// only fields present in the file are kept and comments are dropped.
@@ -449,6 +562,7 @@ pub fn update_areas_registry(
     root: &Path,
     mutate: impl FnOnce(&mut Vec<InstalledArea>),
 ) -> Result<()> {
+    let _rewrite_lock = lock_config_rewrites();
     let config_path = root.join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
     let raw = fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
@@ -469,6 +583,23 @@ pub fn update_areas_registry(
 
     let serialized =
         toml::to_string_pretty(&content).context("serializing vault config")?;
+    fs::write(&config_path, serialized)
+        .with_context(|| format!("writing {}", config_path.display()))?;
+    Ok(())
+}
+
+/// Rewrites `.breadpaper/config.toml` with the `[agent] command` override set
+/// (or cleared with `None`). Re-serializes the known schema like
+/// `update_areas_registry`. Blocking I/O — call from a background thread.
+pub fn update_agent_command(root: &Path, command: Option<String>) -> Result<()> {
+    let _rewrite_lock = lock_config_rewrites();
+    let config_path = root.join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let mut content: VaultConfigContent = toml::from_str(&raw)
+        .with_context(|| format!("parsing {}", config_path.display()))?;
+    content.agent.command = command;
+    let serialized = toml::to_string_pretty(&content).context("serializing vault config")?;
     fs::write(&config_path, serialized)
         .with_context(|| format!("writing {}", config_path.display()))?;
     Ok(())
@@ -542,11 +673,7 @@ mod tests {
         assert_eq!(vault.config.history, VaultConfig::default().history);
         assert_eq!(
             vault.config.areas.installed,
-            vec![InstalledArea {
-                id: "timeline".to_string(),
-                enabled: true,
-                version: 1,
-            }]
+            vec![InstalledArea::new("timeline".to_string(), true, 1)]
         );
         assert!(dir.path().join("daily").is_dir());
         assert!(dir.path().join("weekly").is_dir());
@@ -610,11 +737,7 @@ mod tests {
         .unwrap();
 
         update_areas_registry(dir.path(), |installed| {
-            installed.push(InstalledArea {
-                id: "timeline".to_string(),
-                enabled: true,
-                version: 1,
-            });
+            installed.push(InstalledArea::new("timeline".to_string(), true, 1));
         })
         .unwrap();
         update_areas_registry(dir.path(), |installed| {
@@ -633,11 +756,7 @@ mod tests {
                 assert_eq!(vault.config.weekly, NotesConfig::weekly_default());
                 assert_eq!(
                     vault.config.areas.installed,
-                    vec![InstalledArea {
-                        id: "timeline".to_string(),
-                        enabled: false,
-                        version: 1,
-                    }]
+                    vec![InstalledArea::new("timeline".to_string(), false, 1)]
                 );
             }
             other => panic!("expected valid vault, got {other:?}"),
@@ -686,6 +805,101 @@ mod tests {
                 // before the default day_start, so both fall back.
                 assert_eq!(vault.config.day_planner.day_start, 360);
                 assert_eq!(vault.config.day_planner.day_end, 1440);
+            }
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_config_parsing_and_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[daily]\ndir = \"notes/daily\"\n",
+        )
+        .unwrap();
+
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert_eq!(vault.config.agent.command, None),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+
+        update_agent_command(dir.path(), Some("claude --dangerously".to_string())).unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => {
+                assert_eq!(
+                    vault.config.agent.command,
+                    Some("claude --dangerously".to_string())
+                );
+                // The rewrite preserves the rest of the config.
+                assert_eq!(vault.config.daily.dir, "notes/daily");
+            }
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+
+        update_agent_command(dir.path(), None).unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert_eq!(vault.config.agent.command, None),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+        let raw = fs::read_to_string(marker.join(VAULT_CONFIG_FILE)).unwrap();
+        assert!(!raw.contains("[agent]"), "cleared section reappeared: {raw}");
+    }
+
+    #[test]
+    fn blank_vault_agent_command_means_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[agent]\ncommand = \"  \"\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert_eq!(vault.config.agent.command, None),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn onboarding_registry_fields_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(marker.join(VAULT_CONFIG_FILE), DEFAULT_CONFIG_TOML).unwrap();
+
+        let installed_at = chrono::Utc::now();
+        update_areas_registry(dir.path(), |installed| {
+            let entry = installed.first_mut().unwrap();
+            entry.onboarding_installed_at = Some(installed_at);
+            entry.onboarding_state = Some(OnboardingState::Pending);
+        })
+        .unwrap();
+
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => {
+                let entry = &vault.config.areas.installed[0];
+                assert_eq!(entry.onboarding_state, Some(OnboardingState::Pending));
+                let roundtripped = entry.onboarding_installed_at.unwrap();
+                // Serialized at second precision.
+                assert_eq!(roundtripped.timestamp(), installed_at.timestamp());
+            }
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+
+        // A pre-V5 entry (no onboarding fields) resolves to None.
+        update_areas_registry(dir.path(), |installed| {
+            installed.push(InstalledArea::new("finance".to_string(), true, 1));
+        })
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => {
+                let entry = &vault.config.areas.installed[1];
+                assert_eq!(entry.onboarding_state, None);
+                assert_eq!(entry.onboarding_installed_at, None);
             }
             other => panic!("expected valid vault, got {other:?}"),
         }

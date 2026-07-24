@@ -44,7 +44,19 @@ summary = "Close out yesterday's note — tasks + commits + surrounding context,
 reads   = ["daily/**", "git:log", "mcp:github", "mcp:gitlab"]
 writes  = ["daily/<yesterday>.md (append)"]
 
+[[skill]]
+id      = "onboarding"
+name    = "Set Up Timeline"
+file    = "skills/timeline/onboarding.md"
+summary = "Guided setup — migrate your existing daily notes into this vault (copies, never moves)."
+reads   = ["daily/**", "weekly/**", ".breadpaper/config.toml", "your existing notes (read-only)"]
+writes  = ["daily/**", "weekly/**", ".breadpaper/state/onboarded/timeline"]
+
 [[surface]]
 kind = "dashboard"
 name = "Weekly Dashboard"
 open = "_weekly/site/index.html"
+
+# The skill BreadPaper auto-launches when this Area is added (V5).
+[onboarding]
+skill = "skills/timeline/onboarding.md"
