@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use gpui::{
     Action, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, KeyContext, Pixels, PromptLevel, SharedString, Subscription, WeakEntity, Window,
@@ -18,7 +18,7 @@ use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::areas::{self, AreaManifest};
 use crate::notes::{EnsureNoteOutcome, TimelineEntry, ensure_note};
-use crate::vault::{Vault, VaultStatus, scaffold_vault};
+use crate::vault::{OnboardingState, Vault, VaultStatus, scaffold_vault};
 
 const TIMELINE_PANEL_KEY: &str = "BreadPaperTimelinePanel";
 
@@ -108,7 +108,28 @@ pub struct TimelinePanel {
     collapsed_areas: HashSet<String>,
     show_add_areas: bool,
     position: DockPosition,
+    /// Whether an onboarding marker/expiry check is mid-flight. Checks are
+    /// serialized (never cancelled): a cancelled check could persist a state
+    /// transition and die before its one-shot effect (the tour, the expiry
+    /// re-prompt) fires, silently eating it. Serializing also keeps this
+    /// panel's registry read-modify-writes from racing each other.
+    onboarding_check_running: bool,
+    /// A check was requested while one was running; run one more when it
+    /// finishes so the latest filesystem state is always observed.
+    onboarding_recheck: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A not-yet-onboarded Area whose marker/expiry needs checking (V5 §7.4).
+struct OnboardingCandidate {
+    area_id: String,
+    area_name: String,
+    /// Vault-relative explainer doc — the capabilities tour.
+    doc: String,
+    /// Vault-relative onboarding skill file.
+    onboarding_file: String,
+    state: Option<OnboardingState>,
+    installed_at: Option<DateTime<Utc>>,
 }
 
 impl TimelinePanel {
@@ -123,15 +144,17 @@ impl TimelinePanel {
 
     pub fn new(
         workspace: &mut Workspace,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let project = workspace.project().clone();
         let weak_workspace = workspace.weak_handle();
         let workspace_entity = cx.entity();
         cx.new(|cx| {
-            let project_subscription =
-                cx.subscribe(&project, |this: &mut Self, _, event, cx| {
+            let project_subscription = cx.subscribe_in(
+                &project,
+                window,
+                |this: &mut Self, _, event, window, cx| {
                     if matches!(
                         event,
                         project::Event::WorktreeAdded(_)
@@ -139,8 +162,12 @@ impl TimelinePanel {
                             | project::Event::WorktreeUpdatedEntries(..)
                     ) {
                         this.refresh_vault_status(cx);
+                        // The marker dir lives inside the worktree, so entry
+                        // updates double as the onboarding file-watch.
+                        this.schedule_onboarding_check(window, cx);
                     }
-                });
+                },
+            );
             // On active-item changes, drop the keyboard cursor so the
             // highlight goes back to following the open note.
             let workspace_subscription = cx.subscribe(
@@ -163,9 +190,14 @@ impl TimelinePanel {
                 collapsed_areas: HashSet::new(),
                 show_add_areas: false,
                 position: DockPosition::Left,
+                onboarding_check_running: false,
+                onboarding_recheck: false,
                 _subscriptions: vec![project_subscription, workspace_subscription],
             };
             this.refresh_vault_status(cx);
+            // Startup check: a marker written while the app was closed still
+            // completes onboarding "on next focus" (V5 §7.4).
+            this.schedule_onboarding_check(window, cx);
             this
         })
     }
@@ -388,6 +420,26 @@ impl TimelinePanel {
         .detach_and_log_err(cx);
     }
 
+    /// Launches a skill in the Agent panel (V5 §6.4): the kickoff points the
+    /// user's agent at the live skill file. Connection checks, the
+    /// pre-session checkpoint, and terminal lifecycle all live in the panel's
+    /// launch path.
+    fn run_skill(&mut self, title: String, file: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                crate::agent_panel::AgentPanel::launch_in_workspace(
+                    workspace,
+                    crate::agent_panel::LaunchRequest {
+                        title,
+                        kickoff: Some(crate::agent::run_skill_kickoff(&file)),
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .log_err();
+    }
+
     /// Opens an Area surface (e.g. the weekly dashboard) with the system
     /// handler — Zed has no web view, so HTML opens in the default browser.
     fn open_surface(&mut self, relative_path: String, area_id: String, cx: &mut Context<Self>) {
@@ -427,9 +479,11 @@ impl TimelinePanel {
                         NotificationId::unique::<AreaFileMissingToast>(),
                         format!("{relative_path} is missing from the vault."),
                     )
-                    .on_click("Reinstall the Area's files", move |_window, cx| {
+                    .on_click("Reinstall the Area's files", move |window, cx| {
                         panel
-                            .update(cx, |panel, cx| panel.install_area(area_id.clone(), cx))
+                            .update(cx, |panel, cx| {
+                                panel.install_area(area_id.clone(), window, cx)
+                            })
                             .log_err();
                     }),
                     cx,
@@ -439,20 +493,88 @@ impl TimelinePanel {
     }
 
     /// Materializes a catalog Area into the vault (or re-enables a disabled
-    /// one) and registers it; the section refreshes without a restart.
-    fn install_area(&mut self, area_id: String, cx: &mut Context<Self>) {
+    /// one) and registers it; the section refreshes without a restart. For
+    /// Areas that ship onboarding, a first install continues into the trigger
+    /// flow (V5 §7.3): launch the setup session when an agent is connected,
+    /// otherwise offer the skippable connect-first interstitial.
+    fn install_area(&mut self, area_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.vault_root() else {
             return;
         };
         let workspace = self.workspace.clone();
-        let install =
-            cx.background_spawn(async move { areas::install_area(&root, &area_id) });
-        cx.spawn(async move |this, cx| {
+        let install = cx.background_spawn({
+            async move {
+                areas::install_area(&root, &area_id)?;
+                let entry_state = match Vault::detect(&root) {
+                    VaultStatus::Valid(vault) => vault
+                        .config
+                        .areas
+                        .installed
+                        .iter()
+                        .find(|entry| entry.id == area_id)
+                        .and_then(|entry| entry.onboarding_state),
+                    _ => None,
+                };
+                // Only a pending install (first time, or reinstall after full
+                // removal) triggers the onboarding flow; re-enabling an Area
+                // that was set up before doesn't relaunch it.
+                let onboarding = if entry_state == Some(OnboardingState::Pending) {
+                    areas::catalog_area(&area_id)?.and_then(|area| {
+                        area.manifest
+                            .onboarding
+                            .as_ref()
+                            .map(|onboarding| (area.manifest.name.clone(), onboarding.skill.clone()))
+                    })
+                } else {
+                    None
+                };
+                let vault = match Vault::detect(&root) {
+                    VaultStatus::Valid(vault) => Some(vault),
+                    _ => None,
+                };
+                let connected = crate::agent::resolved_command(vault.as_ref()).is_some();
+                anyhow::Ok((onboarding, connected))
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
             match install.await {
-                Ok(()) => this.update(cx, |this, cx| {
-                    this.show_add_areas = false;
-                    this.refresh_vault_status(cx);
-                }),
+                Ok((onboarding, connected)) => {
+                    this.update(cx, |this, cx| {
+                        this.show_add_areas = false;
+                        this.refresh_vault_status(cx);
+                    })?;
+                    let Some((area_name, onboarding_file)) = onboarding else {
+                        return Ok(());
+                    };
+                    let title = format!("{area_name} setup");
+                    if connected {
+                        this.update_in(cx, |this, window, cx| {
+                            this.run_skill(title, onboarding_file, window, cx);
+                        })?;
+                    } else {
+                        let answer = cx.update(|window, cx| {
+                            window.prompt(
+                                PromptLevel::Info,
+                                &format!("{area_name} is installed."),
+                                Some(
+                                    "Connect your agent to finish setup — it can migrate \
+                                     your existing notes into this vault.",
+                                ),
+                                &["Connect Agent", "Skip"],
+                                cx,
+                            )
+                        })?;
+                        if answer.await.log_err() == Some(0) {
+                            // The launch path itself routes through the
+                            // connect flow first, then continues into this
+                            // session.
+                            this.update_in(cx, |this, window, cx| {
+                                this.run_skill(title, onboarding_file, window, cx);
+                            })?;
+                        }
+                    }
+                    Ok(())
+                }
                 Err(error) => {
                     workspace
                         .update(cx, |workspace, cx| {
@@ -464,6 +586,195 @@ impl TimelinePanel {
             }
         })
         .detach_and_log_err(cx);
+    }
+
+    /// Kicks off a background pass over every not-yet-onboarded Area with an
+    /// onboarding ritual: did the done marker appear, or did the 24 h window
+    /// lapse? Transitions are persisted before their one-shot effects (tour,
+    /// re-prompt) fire, so those effects can't repeat.
+    fn schedule_onboarding_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.onboarding_check_running {
+            self.onboarding_recheck = true;
+            return;
+        }
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return;
+        };
+        let mut candidates = Vec::new();
+        for manifest in &self.areas {
+            let Some(onboarding) = &manifest.onboarding else {
+                continue;
+            };
+            let Some(entry) = vault
+                .config
+                .areas
+                .installed
+                .iter()
+                .find(|entry| entry.id == manifest.id)
+            else {
+                continue;
+            };
+            if entry.onboarding_state == Some(OnboardingState::Onboarded) {
+                continue;
+            }
+            candidates.push(OnboardingCandidate {
+                area_id: manifest.id.clone(),
+                area_name: manifest.name.clone(),
+                doc: manifest.doc.clone(),
+                onboarding_file: onboarding.skill.clone(),
+                state: entry.onboarding_state,
+                installed_at: entry.onboarding_installed_at,
+            });
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let root = vault.root.clone();
+        let decide = cx.background_spawn({
+            let root = root.clone();
+            async move {
+                let now = Utc::now();
+                candidates
+                    .into_iter()
+                    .filter_map(|candidate| {
+                        let marker =
+                            areas::onboarding_marker_path(&root, &candidate.area_id).is_file();
+                        match areas::check_onboarding(
+                            candidate.state,
+                            candidate.installed_at,
+                            marker,
+                            now,
+                        ) {
+                            areas::OnboardingCheck::Nothing => None,
+                            check => Some((candidate, check)),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }
+        });
+        self.onboarding_check_running = true;
+        // Detached rather than stored: dropping the task mid-effect (e.g. on
+        // a burst of filesystem events) could persist a transition and then
+        // never fire its effect.
+        cx.spawn_in(window, async move |this, cx| {
+            for (candidate, check) in decide.await {
+                let outcome = match check {
+                    areas::OnboardingCheck::MarkOnboarded => {
+                        Self::finish_onboarding(&this, &root, candidate, cx).await
+                    }
+                    areas::OnboardingCheck::PromptExpiry => {
+                        Self::expire_onboarding(&this, &root, candidate, cx).await
+                    }
+                    areas::OnboardingCheck::Nothing => Ok(()),
+                };
+                outcome.log_err();
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.onboarding_check_running = false;
+                if std::mem::take(&mut this.onboarding_recheck) {
+                    this.schedule_onboarding_check(window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The done marker appeared: persist `onboarded`, clear the badge, and
+    /// open the Area's explainer doc as the capabilities tour (V5 §7.6).
+    async fn finish_onboarding(
+        this: &WeakEntity<Self>,
+        root: &PathBuf,
+        candidate: OnboardingCandidate,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<()> {
+        let transitioned = cx
+            .background_spawn({
+                let root = root.clone();
+                let area_id = candidate.area_id.clone();
+                async move {
+                    areas::set_onboarding_state(&root, &area_id, OnboardingState::Onboarded)
+                }
+            })
+            .await?;
+        if !transitioned {
+            return Ok(());
+        }
+        let workspace = this.update(cx, |this, cx| {
+            this.refresh_vault_status(cx);
+            this.workspace.clone()
+        })?;
+        let doc_path = areas::vault_file_path(root, &candidate.doc)?;
+        if doc_path.is_file() {
+            crate::open_abs_path_as_preview(workspace.clone(), doc_path, cx).await?;
+        }
+        workspace.update(cx, |workspace, cx| {
+            struct OnboardedToast;
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<OnboardedToast>(),
+                    format!("{} is set up.", candidate.area_name),
+                )
+                .autohide(),
+                cx,
+            );
+        })?;
+        Ok(())
+    }
+
+    /// 24 h passed without a marker: persist `expired` first (so the prompt
+    /// can never fire twice), then re-prompt once via a toast. After this,
+    /// only the quiet Set-up-with-AI run action remains.
+    async fn expire_onboarding(
+        this: &WeakEntity<Self>,
+        root: &PathBuf,
+        candidate: OnboardingCandidate,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<()> {
+        let transitioned = cx
+            .background_spawn({
+                let root = root.clone();
+                let area_id = candidate.area_id.clone();
+                async move {
+                    areas::set_onboarding_state(&root, &area_id, OnboardingState::Expired)
+                }
+            })
+            .await?;
+        if !transitioned {
+            return Ok(());
+        }
+        this.update(cx, |this, cx| {
+            this.refresh_vault_status(cx);
+            let panel = cx.entity().downgrade();
+            let area_name = candidate.area_name.clone();
+            let title = format!("{area_name} setup");
+            let onboarding_file = candidate.onboarding_file.clone();
+            this.workspace
+                .update(cx, |workspace, cx| {
+                    struct OnboardingExpiryToast;
+                    workspace.show_toast(
+                        Toast::new(
+                            NotificationId::unique::<OnboardingExpiryToast>(),
+                            format!("Still want help setting up {area_name}?"),
+                        )
+                        .on_click("Set up with AI", move |window, cx| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.run_skill(
+                                        title.clone(),
+                                        onboarding_file.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .log_err();
+                        }),
+                        cx,
+                    );
+                })
+                .log_err();
+        })?;
+        Ok(())
     }
 
     /// Removing always asks: deactivate (keep all files) or deactivate and
@@ -727,6 +1038,16 @@ impl TimelinePanel {
     fn render_area(&self, manifest: &AreaManifest, cx: &Context<Self>) -> AnyElement {
         let area_id = manifest.id.clone();
         let expanded = !self.collapsed_areas.contains(&manifest.id);
+        // "Finish setup" badge: onboarding is pending (V5 §7.3). Cleared by
+        // the done marker or the 24 h expiry, both persisted transitions.
+        let finishing_setup = manifest.onboarding.is_some()
+            && matches!(
+                &self.vault_status,
+                VaultStatus::Valid(vault) if vault.config.areas.installed.iter().any(|entry| {
+                    entry.id == manifest.id
+                        && entry.onboarding_state == Some(OnboardingState::Pending)
+                })
+            );
         let mut section = v_flex().child(
             ListItem::new(ElementId::Name(SharedString::from(format!(
                 "breadpaper-area-{}",
@@ -743,7 +1064,18 @@ impl TimelinePanel {
                     cx.notify();
                 }
             }))
-            .child(Label::new(manifest.name.clone()))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Label::new(manifest.name.clone()))
+                    .when(finishing_setup, |row| {
+                        row.child(
+                            Label::new("Finish setup")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Accent),
+                        )
+                    }),
+            )
             .end_slot(
                 IconButton::new(
                     ElementId::Name(SharedString::from(format!(
@@ -773,6 +1105,15 @@ impl TimelinePanel {
         if expanded {
             section = section
                 .children(manifest.skills.iter().map(|skill| {
+                    let is_onboarding = manifest
+                        .onboarding
+                        .as_ref()
+                        .is_some_and(|onboarding| onboarding.skill == skill.file);
+                    let run_tooltip = if is_onboarding {
+                        "Set up with AI"
+                    } else {
+                        "Run with your agent"
+                    };
                     ListItem::new(ElementId::Name(SharedString::from(format!(
                         "breadpaper-skill-{}-{}",
                         manifest.id, skill.id
@@ -788,6 +1129,29 @@ impl TimelinePanel {
                     .when(!skill.summary.is_empty(), |item| {
                         item.tooltip(Tooltip::text(skill.summary.clone()))
                     })
+                    .end_slot(
+                        IconButton::new(
+                            ElementId::Name(SharedString::from(format!(
+                                "breadpaper-run-skill-{}-{}",
+                                manifest.id, skill.id
+                            ))),
+                            IconName::PlayOutlined,
+                        )
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text(run_tooltip))
+                        .on_click(cx.listener({
+                            let title = if is_onboarding {
+                                format!("{} setup", manifest.name)
+                            } else {
+                                skill.name.clone()
+                            };
+                            let file = skill.file.clone();
+                            move |this, _, window, cx| {
+                                this.run_skill(title.clone(), file.clone(), window, cx);
+                            }
+                        })),
+                    )
                     .on_click(cx.listener({
                         let area_id = area_id.clone();
                         let file = skill.file.clone();
@@ -861,8 +1225,8 @@ impl TimelinePanel {
                         .when(!manifest.summary.is_empty(), |item| {
                             item.tooltip(Tooltip::text(manifest.summary.clone()))
                         })
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.install_area(area_id.clone(), cx);
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.install_area(area_id.clone(), window, cx);
                         }))
                     }))
                 }

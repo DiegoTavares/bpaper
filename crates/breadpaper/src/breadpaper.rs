@@ -1,3 +1,5 @@
+pub mod agent;
+pub mod agent_panel;
 pub mod areas;
 pub mod day_plan;
 pub mod day_planner_panel;
@@ -14,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use workspace::{AppState, OpenOptions, OpenVisible, Workspace};
 
+pub use agent_panel::AgentPanel;
 pub use day_planner_panel::DayPlannerPanel;
 pub use timeline_panel::{TimelinePanel, show_panel_if_vault};
 pub use vault::{Vault, VaultStatus, default_vault_path, scaffold_vault};
@@ -21,6 +24,7 @@ pub use vault::{Vault, VaultStatus, default_vault_path, scaffold_vault};
 pub fn init(cx: &mut App) {
     timeline_panel::init(cx);
     day_planner_panel::init(cx);
+    agent_panel::init(cx);
 }
 
 /// Opens `path` and lands the user on a rendered markdown preview of it

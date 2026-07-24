@@ -1559,7 +1559,13 @@
   // Whether to disable all AI features in Zed.
   //
   // Default: false
-  "disable_ai": false,
+  //
+  // BreadPaper: the inherited Zed agent panel and AI entry points are hidden
+  // by default (V5 spec §6.3 "De-Zed-ification") — the BreadPaper Agent panel
+  // hosts the user's own CLI agent instead. Setting-level, never code
+  // removal, so upstream rebases stay cheap. Users can re-enable Zed's AI by
+  // overriding this in their settings.
+  "disable_ai": true,
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
   "auto_update": true,
