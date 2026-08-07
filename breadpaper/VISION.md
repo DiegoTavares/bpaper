@@ -6,16 +6,17 @@
 **Status:** Discussion draft — for the founding design + engineering team.
 **Author:** Diego · **Date:** 2026-07-20
 
-**Decisions so far (2026-07-20):**
+**Decisions so far:**
+- **Naming (2026-08-07):** the installable life-domain bundle is a **Routine** (formerly "Area" — always a placeholder). A Routine packages a *practiced rhythm* — rituals, their files, their views — and since V7 it is defined by a vault-visible `routines/<id>/routine.toml` the user or their agent can author. Specs V3–V6 keep "Area" as historical record; read *Routine* wherever they say *Area*. See `specs/v7-dynamic-routines.md`.
 - **Fork strategy:** _fork required — scope now known._ A custom left-nav pane (Timeline) is a V1 must-have, and Zed's extension API **cannot render any custom panel/dock/UI** (confirmed against the extension API source, docs, and maintainer statements — see §7.1). Panels are core Rust/GPUI. So BreadPaper is a **fork whose custom surface is a small set of new GPUI panels + an invisible-git service**, with the AI rituals riding the *existing* extension + MCP rails (those need no fork). "Prototype first" still holds — but the prototype is a minimal fork, not an extension.
 - **v1 audience:** _technical-first_ — ship rough and powerful for engineers who already live in editors; onboarding polish comes later. (§10 Q4)
-- **Repo layout:** _single repo — the fork is the product._ Development happens directly on the Zed fork (`github.com/DiegoTavares/bpaper`, cloned to `~/dev/bpaper`), **not** a submodule. All non-Zed content (this doc, design docs, Area packages) lives isolated under `/breadpaper/` so the fork's delta against upstream stays legible and is trivially extractable later (`git filter-repo`). `upstream` remote → `zed-industries/zed` for ongoing rebases. The personal vault (`~/dev/bread-paper`) stays **out** of this repo — private data, separate concern. Named `bpaper`, distinct from the `bread-paper` vault to avoid on-disk/name collision.
+- **Repo layout:** _single repo — the fork is the product._ Development happens directly on the Zed fork (`github.com/DiegoTavares/bpaper`, cloned to `~/dev/bpaper`), **not** a submodule. All non-Zed content (this doc, design docs, Routine packages) lives isolated under `/breadpaper/` so the fork's delta against upstream stays legible and is trivially extractable later (`git filter-repo`). `upstream` remote → `zed-industries/zed` for ongoing rebases. The personal vault (`~/dev/bread-paper`) stays **out** of this repo — private data, separate concern. Named `bpaper`, distinct from the `bread-paper` vault to avoid on-disk/name collision.
 
 ---
 
 ## 1. The one-sentence pitch
 
-BreadPaper is a desktop app — a private fork of the [Zed](https://zed.dev) editor — that turns a folder of plain Markdown files into a **guided, LLM-augmented second brain**. It ships with pre-built "Areas" (finance, weekly reviews, journaling, team notes) that each come with their own files, layout, and AI rituals, so a person gets the power of a hand-tuned Obsidian-plus-Claude-Code setup **without having to build it themselves.**
+BreadPaper is a desktop app — a private fork of the [Zed](https://zed.dev) editor — that turns a folder of plain Markdown files into a **guided, LLM-augmented second brain**. It ships with pre-built "Routines" (finance, weekly reviews, journaling, team notes) that each come with their own files, layout, and AI rituals, so a person gets the power of a hand-tuned Obsidian-plus-Claude-Code setup **without having to build it themselves.**
 
 ## 2. Why this, why now
 
@@ -46,7 +47,7 @@ These are the invariants. Design and engineering decisions should be checkable a
 3. **Bring your own brain.** The user chooses and pays for their own LLM (Claude, local model, etc.) via their own key or a console integration. BreadPaper is not a subscription reseller of intelligence.
 4. **Human-in-the-loop for anything that matters.** The AI computes and recommends; the human acts. It will tell you exactly how much to pay down your line of credit — it will not (and cannot) move the money.
 5. **Living plans over frozen advice.** Canonical files are the source of truth. The AI reads them before advising and edits them when reality shifts, so the plan never drifts from the person.
-6. **Modular life.** Nobody wants every module. Areas are opt-in. A user can run only daily notes, or add finance, journaling, team notes — each independently.
+6. **Modular life.** Nobody wants every module. Routines are opt-in. A user can run only daily notes, or add finance, journaling, team notes — each independently.
 7. **Invisible versioning.** Git runs underneath for full history and safety, but the user never types a git command or sees a git pane. Time-travel, not source control.
 8. **Everything is editable.** Skills, layouts, prompts, and templates are files the user (and their LLM) can open and change. Power users can rewrite the rituals; the app just ships great defaults.
 
@@ -55,10 +56,10 @@ These are the invariants. Design and engineering decisions should be checkable a
 BreadPaper looks like a focused, three-pane writing environment. Zed's speed and editing quality are the foundation; the chrome around it is re-conceived for life-management rather than code.
 
 ### 5.1 Left rail A — **Timeline** (the "now" navigator)
-A small, always-present list of the files you almost always want: **Today**, **Yesterday**, **This Week**, **Last Week**. One click (or keystroke) opens the right note. It resolves the app's naming conventions for the user (daily = `YYYY-MM-DD.md`, weekly = ISO week `YYYY-Www.md`, e.g. `2026-W30.md`) so they never think about filenames. Creating today's note if it doesn't exist yet is a single action — replacing the current "open Obsidian just to trigger a plugin" workaround.
+A small, always-present list of the files you almost always want: **Today**, **Yesterday**, **This Week**, **Last Week**. One click (or keystroke) opens the right note. It resolves the app's naming conventions for the user (daily = `YYYY-MM-DD.md`, weekly = ISO week `YYYY-Www.md`, e.g. `2026-W30.md`) so they never think about filenames. Creating today's note if it doesn't exist yet is a single action — replacing the current "open Obsidian just to trigger a plugin" workaround. _(Since V7 these rows are the Timeline Routine's own templated quick links — the panel is purely sections-per-Routine — while note creation and the `breadpaper: open …` actions stay core.)_
 
-### 5.2 Left rail B — **Areas** (the modular navigator)
-A switchable list of the life-domains the user has enabled: _Daily & Weekly_, _Finance_, _Journaling_, _Team_, etc. Each Area is a bundle of folders, templates, a right-pane context view, and skills. Users add or remove Areas from a gallery. Beneath the Areas view, the full file tree remains available for people who want to roam freely.
+### 5.2 Left rail B — **Routines** (the modular navigator)
+A switchable list of the life-domains the user has enabled: _Daily & Weekly_, _Finance_, _Journaling_, _Team_, etc. Each Routine is a bundle of folders, templates, quick links, a right-pane context view, and skills — defined by a vault-visible `routines/<id>/routine.toml` (V7), so the app-shipped catalog is just one way a Routine gets there: the user's own agent can author one directly in the vault. Users add or remove Routines from a gallery. Beneath the Routines view, the full file tree remains available for people who want to roam freely.
 
 ### 5.3 Right rail — **Context** (page-aware companion)
 The right pane changes with the open document:
@@ -71,7 +72,7 @@ The right pane changes with the open document:
 This is where BreadPaper stops feeling like a text editor and starts feeling like an instrument tuned to the thing you're doing.
 
 ### 5.4 **Skills view** — the rituals, made visible and editable
-Every Area exposes its skills as first-class, inspectable objects, not hidden slash-commands. Example skills, drawn directly from the author's working setup:
+Every Routine exposes its skills as first-class, inspectable objects, not hidden slash-commands. Example skills, drawn directly from the author's working setup:
 
 | Skill | What it does |
 |---|---|
@@ -83,7 +84,7 @@ Every Area exposes its skills as first-class, inspectable objects, not hidden sl
 Each skill is openable, has a plain-language description, a prompt/logic body the user or their LLM can edit, and clear declarations of **what it reads** (data sources) and **what it writes** (which files, append vs. edit). Trust comes from that transparency.
 
 ### 5.5 **Onboarding** — teaching what's possible
-A first-run flow that (a) points BreadPaper at a new or existing folder, (b) connects an LLM, (c) lets the user pick their starting Areas from a gallery, and (d) walks them through their first ritual (e.g. create today's note, run a daily closure). The goal is that within ten minutes a new user has done one real, valuable thing — not stared at a blank editor.
+A first-run flow that (a) points BreadPaper at a new or existing folder, (b) connects an LLM, (c) lets the user pick their starting Routines from a gallery, and (d) walks them through their first ritual (e.g. create today's note, run a daily closure). The goal is that within ten minutes a new user has done one real, valuable thing — not stared at a blank editor.
 
 ### 5.6 **Backlog** — the holding pen
 _(added 2026-07-24 — not part of the original plan)_ A bottom-dock checklist over a plain `backlog.md` with three sections: **Soon**, **Someday**, and a dated **Completed** history. The daily/weekly wrap rituals offer to move unfinished tasks there (always confirming — all, none, or some), so lingering work stops dying in yesterday's note. Checking an item off in the panel records it as done in today's note and files it under Completed with the date. Spec: `specs/v6-backlog.md`.
@@ -100,14 +101,13 @@ _(added 2026-07-24 — not part of the original plan)_ A bottom-dock checklist o
 - Editor chrome and affordances that assume "you are writing software," where they conflict with the life-OS framing.
 
 **Added**
-- The **Timeline** left rail (Today / Yesterday / This Week / Last Week).
-- The **Areas** left rail + Area gallery / enable-disable.
+- The **Routines** left rail (V7: one section per enabled Routine — quick links like Today / Yesterday / This Week / Last Week, then skills) + gallery / enable-disable.
 - The page-aware **Context** right rail (time blocks, week calendar, finance dashboard).
 - The **Skills view** (inspect + edit rituals; declared read/write scopes).
 - The **Backlog** bottom panel — Soon / Someday / Completed over `backlog.md`, fed by the wrap rituals.
 - **Onboarding** flow.
 - **Invisible git** automation.
-- An **Area package format** — the bundle (folders + templates + right-pane view + skills + docs) that makes a domain installable.
+- A **Routine package format** — the `routine.toml` bundle (folders + templates + quick links + skills + docs) that makes a domain installable, whether shipped in the catalog or authored in the vault by the user's agent.
 
 ## 7. Technical shape (for the engineers)
 
@@ -119,7 +119,7 @@ Confirmed 2026-07-20 against primary sources (Zed's `crates/extension_api` trait
 
 Consequence for BreadPaper — a clean split:
 
-- **Requires touching core (fork):** the Timeline pane, the Areas pane, the page-aware Context pane — each is a new GPUI `Panel` registered in the workspace dock. Plus the invisible-git background service.
+- **Requires touching core (fork):** the Timeline/Routines pane, the page-aware Context pane — each is a new GPUI `Panel` registered in the workspace dock. Plus the invisible-git background service.
 - **Does _not_ require a fork:** the AI rituals. Daily Closure, Week Review, Friday Finance, and the Monarch/GitHub/GitLab connectors fit the existing **extension + MCP** model and can load into our fork as ordinary Zed extensions.
 
 Design implication: keep the fork's custom surface **small and panel-shaped**, and push as much logic as possible into extensions/MCP so we stay mergeable with upstream. The relevant upstream hope — RFC #53403 "Visual Extension API" (Apr 2026) — is maintainer-gated and explicitly deprioritized, so it must not be counted on.
@@ -130,11 +130,11 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 
 - **Base:** private fork of Zed (Rust + GPUI). We inherit a fast, native, cross-platform editor. Risk: staying mergeable with upstream vs. diverging — mitigated by §7.1's small-fork/large-extension split.
 - **Vault = folder on disk.** No new storage engine. Conventions (naming, PARA-style folders) are encoded in the app so the user doesn't maintain them by hand.
-- **Areas as packages.** An Area is a declarative bundle: folder scaffolding + templates + a right-pane view spec + a set of skills + a `README`. Installing an Area writes its scaffolding into the vault and registers its views/skills. This is the key extensibility primitive and deserves early design attention.
+- **Routines as packages.** A Routine is a declarative bundle: folder scaffolding + templates + quick links + a set of skills + docs, defined by a vault-visible `routines/<id>/routine.toml` (V7). Installing (or activating a vault-authored) Routine writes its scaffolding into the vault, records hash-lockfile provenance, and registers its links/skills. This is the key extensibility primitive — and since V7 the user's own agent can author new Routines directly in the vault, no rebuild required.
 - **Skills = portable, declarable rituals.** Today they're Claude Code slash-commands with implicit behavior. In BreadPaper a skill declares its **inputs** (files, MCP data sources), its **actions**, and its **outputs** (which files, append vs. edit) so the UI can show scope and the app can sandbox writes. The runtime executes them through the user's chosen LLM.
 - **Data connectors via MCP.** Monarch, GitHub/GitLab, calendar, etc. arrive as MCP servers (the author already runs Obsidian + Monarch MCP). BreadPaper should make connecting an MCP source a first-class, guided step rather than hand-edited JSON.
 - **Invisible versioning.** A background service commits meaningful checkpoints (autosave/idle/pre-AI-write) to a hidden git repo, exposes a human "history / restore this version" UI, and surfaces conflict recovery — all without the word "git" ever appearing.
-- **Dashboards as an output type.** The `structured data (data.js) → static HTML that computes its own analytics` pattern is a repeatable Area capability: skills emit machine-readable feeds; a bundled viewer derives insight. Worth generalizing into the Area format.
+- **Dashboards as an output type.** The `structured data (data.js) → static HTML that computes its own analytics` pattern is a repeatable Routine capability: skills emit machine-readable feeds; a bundled viewer derives insight. Worth generalizing into the Routine format.
 
 ## 8. Why it's valuable
 
@@ -157,16 +157,16 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 - **BYO-LLM UX is fiddly.** Keys, model choice, local vs. cloud, cost visibility, and graceful failure need thought so non-experts aren't stranded.
 - **Onboarding a non-technical user into a fork of a code editor** is a real design challenge — the gap between "engineer's dream" and "my mom could use it" is wide, and v1 should pick a lane honestly.
 
-**Provisional recommendation:** Build the **thinnest thing that proves the core loop** first — Timeline rail + one Area (Daily/Weekly) + one working skill (Daily Closure) + invisible git — on top of Zed, before committing to the full Areas/Skills package framework. Treat it as a personal tool that earns its way to being a product.
+**Provisional recommendation:** Build the **thinnest thing that proves the core loop** first — Timeline rail + one Routine (Daily/Weekly) + one working skill (Daily Closure) + invisible git — on top of Zed, before committing to the full Routines/Skills package framework. Treat it as a personal tool that earns its way to being a product.
 
 ## 10. Open questions for the team
 
 1. **Fork depth:** deep Zed fork, thin overlay, or extension-based? What keeps us mergeable with upstream long enough to matter?
-2. **Area package format:** what's the minimum declarative spec for a bundle (folders + views + skills + connectors)?
+2. **Routine package format:** what's the minimum declarative spec for a bundle (folders + views + skills + connectors)? _(Largely answered by V3/V7: `routine.toml` schema 2; connectors and view specs still open.)_
 3. **Skill contract:** how do we declare/enforce a skill's read/write scope so users can trust it and the app can sandbox it?
 4. **Audience for v1:** technical-first (ship rough, powerful) or approachable-first (invest in onboarding early)? These pull the design in different directions.
 5. **Invisible git:** what exactly triggers a checkpoint, and what does "restore" look like to someone who's never heard of a commit?
-6. **Distribution & model:** open-source core? paid Areas? one-time vs. subscription (for the app, never the intelligence)?
+6. **Distribution & model:** open-source core? paid Routines? one-time vs. subscription (for the app, never the intelligence)?
 7. **The name & tagline:** does "BreadPaper" land, and how do we say the value in one line? (see below)
 
 ## 11. Tagline candidates (to workshop)
@@ -189,29 +189,31 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 - [ ] **Invisible git — checkpoint service** — background snapshots to hidden `.breadpaper/history` git-dir. _(in progress)_
 
 ### Milestone 1 — The core loop (thinnest thing that proves it)
-- [x] **Daily & Weekly Area** — first packaged Area, shipped as the installable **Timeline Area** (scaffolded folders + weekly dashboard + Week Review skill; the daily note's page-aware context view shipped later as the Milestone 3 Day Planner rail). _(shipped)_
-- [x] **Daily Closure skill** — shipped as the Timeline Area's **Wrap Today / Wrap Yesterday** skills: read the day's tasks, pull its commits (`gh` / `glab` / local git), scan the prior few daily notes for multi-day context, and append a `# Daily Closure` review to the day's note — append-only, never rewriting what the user wrote. _(shipped)_
+- [x] **Daily & Weekly Routine** — first packaged Routine, shipped as the installable **Timeline** bundle (scaffolded folders + weekly dashboard + Week Review skill; the daily note's page-aware context view shipped later as the Milestone 3 Day Planner rail). _(shipped)_
+- [x] **Daily Closure skill** — shipped as the Timeline Routine's **Wrap Today / Wrap Yesterday** skills: read the day's tasks, pull its commits (`gh` / `glab` / local git), scan the prior few daily notes for multi-day context, and append a `# Daily Closure` review to the day's note — append-only, never rewriting what the user wrote. _(shipped)_
 - [ ] **Invisible git — restore UI** — human "history / restore this version" surface; no git vocabulary. _(planned)_
 - [ ] **Checkpoint triggers** — autosave / idle / pre-AI-write commit points. _(planned)_
 - [x] **BYO-LLM connection** — ride Zed's existing agent/console rails; user brings their own key.
-- [x] **Backlog pane & capture** — `backlog.md` (Soon / Someday / dated Completed) + a bottom-dock editable checklist panel: inline task editing, Soon ↔ Someday moves, reveal-in-file; mark-done appends to today's note (create-if-missing) then files the task under Completed with the date. The Timeline Area's wrap skills (v2) offer unfinished tasks for the backlog — all / none / some, user-confirmed, deduplicated. Added 2026-07-24, spec `specs/v6-backlog.md`. _(shipped)_
+- [x] **Backlog pane & capture** — `backlog.md` (Soon / Someday / dated Completed) + a bottom-dock editable checklist panel: inline task editing, Soon ↔ Someday moves, reveal-in-file; mark-done appends to today's note (create-if-missing) then files the task under Completed with the date. The Timeline Routine's wrap skills (v2) offer unfinished tasks for the backlog — all / none / some, user-confirmed, deduplicated. Added 2026-07-24, spec `specs/v6-backlog.md`. _(shipped)_
 
-### Milestone 2 — Areas & Skills framework
-- [x] **Area package format** — declarative `manifest.toml` bundle (folder/file scaffold + skills + surfaces + doc), materialized create-if-missing and recorded in a per-vault `[[areas.installed]]` registry. _(shipped)_
-- [x] **Areas left rail + gallery** — an Areas section in the Timeline panel: enabled Areas with their skills/surfaces, **Add Area** from the app catalog, and remove-with-confirmation that preserves user-modified files. A standalone gallery UI is still to come. _(shipped)_
-- [x] **Skills view** — an Area's skills are inspectable, openable Markdown files with a plain-language summary; read/write scopes are declared in the manifest. Surfacing those scopes in the UI is still pending. _(shipped)_
+### Milestone 2 — Routines & Skills framework
+- [x] **Routine package format** — declarative bundle (folder/file scaffold + skills + surfaces + doc), materialized create-if-missing and recorded in a per-vault registry. Shipped in V3 as a compiled-in `manifest.toml`; V7 inverted the source of truth to a vault-visible `routines/<id>/routine.toml` (schema 2: quick links with date templates and open kinds, icon, `agent_doc`) with hash-lockfile provenance and a `[[routines.installed]]` registry. _(shipped)_
+- [x] **Dynamic Routines** — `routine.toml` files appearing in the vault are discovered without a restart, validated with visible errors, and offered for explicit activation; removal deletes only declared files left unmodified since activation. Any Routine link or skill is keybindable via the generic `breadpaper::OpenLink` / `breadpaper::RunSkill` actions. Spec `specs/v7-dynamic-routines.md`. _(shipped)_
+- [x] **Agentic Routine authoring** — the core **New Routine** ritual: the user's agent interviews them, writes the `routine.toml` + docs + skills into the vault (`routines/ROUTINES.md` is the self-describing format reference), and a ready marker earns an activation toast. _(shipped)_
+- [x] **Routines left rail + gallery** — V7: the panel is purely sections-per-Routine (quick links, then skills under a folder row), with **Add Routine** listing the catalog and the "In this vault" discoveries, and remove-with-confirmation that preserves user-modified files. A standalone gallery UI is still to come. _(shipped)_
+- [x] **Skills view** — a Routine's skills are inspectable, openable Markdown files with a plain-language summary; read/write scopes are declared in the manifest. Surfacing those scopes in the UI is still pending. _(shipped)_
 - [ ] **Skill contract & write sandbox** — enforce inputs/outputs so writes are previewable and scoped. Scopes are now _declared_ in the manifest but not yet enforced. _(planned)_
 
 ### Milestone 3 — Context rail & connectors
 - [x] **Page-aware Context right rail — day planner** — first page-aware panel (spec `specs/v4-day-planner-panel.md`): a right-dock Day Planner that follows the active editor item and renders a daily note's checklist as a time-block day grid — timed tasks as duration-scaled blocks in Google-Calendar-style overlap columns, time-less tasks as unscheduled chips, done tasks struck through. Read-only with reveal-on-click into the editor, live re-parse on edit, and a `[day_planner]` config section. Week-calendar and finance-dashboard context views still pending. _(shipped)_
 - [ ] **MCP connector onboarding** — Monarch, GitHub/GitLab, calendar as a guided step, not hand-edited JSON. _(planned)_
-- [x] **Week Review skill** — ships with the Timeline Area: aggregate daily/weekly notes + GitHub PRs (`gh`) / GitLab MRs (`glab`), append an AI review to the weekly note, and feed the dashboard. Rides the `gh`/`glab` CLIs; guided MCP connectors still pending. _(shipped)_
+- [x] **Week Review skill** — ships with the Timeline Routine: aggregate daily/weekly notes + GitHub PRs (`gh`) / GitLab MRs (`glab`), append an AI review to the weekly note, and feed the dashboard. Rides the `gh`/`glab` CLIs; guided MCP connectors still pending. _(shipped)_
 - [ ] **Friday Finance skill** — live Monarch pull, credit-card sweep + LoC residual, action list, log outcome. _(planned)_
 - [ ] **Journaling Topic skill** — detect avoidance/momentum, surface a neglected topic. Read-only. _(planned)_
-- [x] **Dashboard output type** — `data.js → static HTML that computes its own analytics`, shipped as the Timeline Area's Weekly Dashboard and generalized into the Area format as an openable **surface**. _(shipped)_
+- [x] **Dashboard output type** — `data.js → static HTML that computes its own analytics`, shipped as the Timeline Routine's Weekly Dashboard and generalized into the Routine format as an openable browser link. _(shipped)_
 
 ### Milestone 4 — Onboarding & de-Zed-ification
-- [ ] **First-run onboarding** — point at a folder, connect an LLM, pick Areas, run first ritual in <10 min. _(planned)_
+- [ ] **First-run onboarding** — point at a folder, connect an LLM, pick Routines, run first ritual in <10 min. _(planned)_
 - [ ] **Remove code-editor chrome** — disable git pane + subscription/billing surfaces that conflict with the life-OS framing. _(planned)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
