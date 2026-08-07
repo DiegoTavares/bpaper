@@ -214,41 +214,80 @@ fn try_match(
         let date = NaiveDate::from_ymd_opt(fields.year?, fields.month?, fields.day?)?;
         return (format_date(date, format) == full_input).then_some(date);
     };
-    let recurse = |input: &str, fields: DateFields| {
-        try_match(rest_tokens, input, fields, format, full_input)
-    };
+    let recurse =
+        |input: &str, fields: DateFields| try_match(rest_tokens, input, fields, format, full_input);
     match token {
-        FormatToken::Literal(literal) => {
-            recurse(input.strip_prefix(*literal)?, fields)
-        }
+        FormatToken::Literal(literal) => recurse(input.strip_prefix(*literal)?, fields),
         FormatToken::Run('Y', 2) => {
             let (value, rest) = take_digits(input, 2)?;
-            recurse(rest, DateFields { year: Some(2000 + value as i32), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    year: Some(2000 + value as i32),
+                    ..fields
+                },
+            )
         }
         FormatToken::Run('Y', _) => {
             let (value, rest) = take_digits(input, 4)?;
-            recurse(rest, DateFields { year: Some(value as i32), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    year: Some(value as i32),
+                    ..fields
+                },
+            )
         }
         FormatToken::Run('M', 1) => [2, 1].iter().find_map(|&width| {
             let (value, rest) = take_digits(input, width)?;
-            recurse(rest, DateFields { month: Some(value), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    month: Some(value),
+                    ..fields
+                },
+            )
         }),
         FormatToken::Run('M', 2) => {
             let (value, rest) = take_digits(input, 2)?;
-            recurse(rest, DateFields { month: Some(value), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    month: Some(value),
+                    ..fields
+                },
+            )
         }
         FormatToken::Run('M', run) => MONTH_NAMES.iter().enumerate().find_map(|(index, name)| {
             let name = if *run == 3 { &name[..3] } else { name };
             let rest = input.strip_prefix(name)?;
-            recurse(rest, DateFields { month: Some(index as u32 + 1), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    month: Some(index as u32 + 1),
+                    ..fields
+                },
+            )
         }),
         FormatToken::Run('D', 1) => [2, 1].iter().find_map(|&width| {
             let (value, rest) = take_digits(input, width)?;
-            recurse(rest, DateFields { day: Some(value), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    day: Some(value),
+                    ..fields
+                },
+            )
         }),
         FormatToken::Run('D', _) => {
             let (value, rest) = take_digits(input, 2)?;
-            recurse(rest, DateFields { day: Some(value), ..fields })
+            recurse(
+                rest,
+                DateFields {
+                    day: Some(value),
+                    ..fields
+                },
+            )
         }
         FormatToken::Run('d', 1) => recurse(take_digits(input, 1)?.1, fields),
         FormatToken::Run('d', 2) => WEEKDAY_NAMES
@@ -279,12 +318,7 @@ fn take_digits(input: &str, width: usize) -> Option<(u32, &str)> {
 
 /// Expands Obsidian-style template tokens: `{{date}}`, `{{date:FORMAT}}`,
 /// `{{time}}`, and `{{title}}`. Unrecognized tokens are left as-is.
-pub fn expand_template(
-    template: &str,
-    date: NaiveDate,
-    time: NaiveTime,
-    title: &str,
-) -> String {
+pub fn expand_template(template: &str, date: NaiveDate, time: NaiveTime, title: &str) -> String {
     let mut output = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -330,8 +364,22 @@ pub fn ensure_note(
     time: NaiveTime,
 ) -> Result<(PathBuf, EnsureNoteOutcome)> {
     let path = vault.note_path(kind, date);
+    let outcome = ensure_note_at(vault, kind, date, time, &path)?;
+    Ok((path, outcome))
+}
+
+/// `ensure_note` for an arbitrary destination: Routine links with date
+/// templates (V7 §6) create their target from the note kind's template even
+/// when the declared path differs from the configured note path.
+pub fn ensure_note_at(
+    vault: &Vault,
+    kind: NoteKind,
+    date: NaiveDate,
+    time: NaiveTime,
+    path: &Path,
+) -> Result<EnsureNoteOutcome> {
     if path.exists() {
-        return Ok((path, EnsureNoteOutcome::AlreadyExisted));
+        return Ok(EnsureNoteOutcome::AlreadyExisted);
     }
 
     let template_path = vault.template_path(kind);
@@ -355,14 +403,18 @@ pub fn ensure_note(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    write_new_file(&path, &contents)?;
-    Ok((path, outcome))
+    write_new_file(path, &contents)?;
+    Ok(outcome)
 }
 
 /// Creates `path` with `contents`, failing if it already exists, and removing
 /// the file again if the write fails partway so no partial note is left behind.
 fn write_new_file(path: &Path, contents: &str) -> Result<()> {
-    let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
         Err(error) => {
@@ -396,7 +448,10 @@ mod tests {
         let d = date(2026, 7, 20); // a Monday
         assert_eq!(format_date(d, "YYYY-MM-DD"), "2026-07-20");
         assert_eq!(format_date(d, "YY M D"), "26 7 20");
-        assert_eq!(format_date(d, "dddd, MMMM D, YYYY"), "Monday, July 20, 2026");
+        assert_eq!(
+            format_date(d, "dddd, MMMM D, YYYY"),
+            "Monday, July 20, 2026"
+        );
         assert_eq!(format_date(d, "ddd MMM DD"), "Mon Jul 20");
         assert_eq!(format_date(d, "dd"), "Mo");
         assert_eq!(format_date(d, "d"), "1");

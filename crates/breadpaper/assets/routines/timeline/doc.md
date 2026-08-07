@@ -1,19 +1,20 @@
-# Daily & Weekly (the Timeline Area)
+# Daily & Weekly (the Timeline Routine)
 
-This Area closes the loop on your daily and weekly rhythm: it turns a week of
-notes and code activity into a reviewed, visualized record. This page is the
-tour — each section ends with something to try right now.
+This Routine closes the loop on your daily and weekly rhythm: it turns a week
+of notes and code activity into a reviewed, visualized record. This page is
+the tour — each section ends with something to try right now.
 
 ## The Timeline
 
-The **Timeline** panel in the left sidebar is always on:
+The Routines panel in the left sidebar carries this Routine's section:
 
 - **Today** / **Yesterday** open daily notes (`daily/YYYY-MM-DD.md` by
   default), created from `templates/daily.md` the first time.
 - **This Week** / **Last Week** open weekly notes (`weekly/GGGG-Www.md` by
   default), created from `templates/weekly.md`.
 - The same entries (plus **Tomorrow**) live in the command palette:
-  `breadpaper: open today` and friends.
+  `breadpaper: open today` and friends — they work even with this Routine's
+  section hidden.
 
 Existing notes are only ever opened — never overwritten.
 
@@ -36,8 +37,8 @@ day grid. Click a block to jump to its line.
 ## The skills
 
 Skills are rituals your **own agent** runs — plain markdown files you can
-open, read, and edit. Hover a skill in the Areas section and press the run
-button, use `breadpaper: run skill` from the palette, or invoke them as
+open, read, and edit. Hover a skill in this Routine's section and press the
+run button, use `breadpaper: run skill` from the palette, or invoke them as
 slash commands inside an agent conversation:
 
 - **Wrap Today** (`/wrap-today`) — close out today's note: tasks, the day's
@@ -52,8 +53,8 @@ slash commands inside an agent conversation:
 
 Every skill appends; none of them rewrite or delete what you wrote.
 
-> **Try it now:** run **Wrap Today** from the Areas rail and watch your agent
-> work in the Agent panel.
+> **Try it now:** run **Wrap Today** from the Routines panel and watch your
+> agent work in the Agent panel.
 
 ## The backlog
 
@@ -74,23 +75,23 @@ backlog are never duplicated.
 
 ## The weekly dashboard
 
-`weekly/site/index.html` — click **Weekly Dashboard** in the Areas section
-to open it in your browser. It computes per-week stats, sparklines, goal
-completion, and warnings (time sinks, carry-overs, lingering projects) from
-the feed in `weekly/site/data.js`. It starts empty; each Week Review appends
-one entry.
+`weekly/site/index.html` — click **Weekly Dashboard** in this Routine's
+section to open it in your browser. It computes per-week stats, sparklines,
+goal completion, and warnings (time sinks, carry-overs, lingering projects)
+from the feed in `weekly/site/data.js`. It starts empty; each Week Review
+appends one entry.
 
 ## Make it yours
 
 Everything is a plain file:
 
+- `routines/timeline/routine.toml` — this Routine's definition: its name,
+  quick links, and skill list. Edit it and the panel follows.
 - `templates/daily.md`, `templates/weekly.md` — what new notes start from.
-- `skills/timeline/*.md` — the rituals themselves. Edit one and the next run
-  honors your edit; the agent always reads the live file.
+- `routines/timeline/skills/*.md` — the rituals themselves. Edit one and the
+  next run honors your edit; the agent always reads the live file.
 - `.breadpaper/config.toml` — where notes live, how they're named, and this
   vault's agent command override.
-- `.breadpaper/areas/timeline/manifest.toml` — the installed record of what
-  this Area shipped.
 
-Removing this Area never touches your notes, and any shipped file you have
+Removing this Routine never touches your notes, and any shipped file you have
 edited is kept.

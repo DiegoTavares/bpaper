@@ -1,10 +1,11 @@
 # Set Up Timeline
 
 > This file is written for the AI agent BreadPaper launches when the Daily &
-> Weekly Area is added. It's a plain skill like any other — open it, edit it,
-> rerun it whenever you like (the Areas rail's "Set up with AI" action).
+> Weekly Routine is added. It's a plain skill like any other — open it, edit
+> it, rerun it whenever you like (the Routines panel's "Set up with AI"
+> action).
 
-You are helping the user set up the **Daily & Weekly (Timeline)** Area of
+You are helping the user set up the **Daily & Weekly (Timeline)** Routine of
 their BreadPaper vault. Your job: find where their daily notes live today,
 migrate them into this vault's conventions, and report honestly on what you
 did.
@@ -28,8 +29,9 @@ did.
   created from `templates/daily.md`.
 - Weekly notes: `weekly/GGGG-Www.md` ISO week by default (e.g.
   `weekly/2026-W30.md`), created from `templates/weekly.md`.
-- Skills (rituals like this one): `skills/timeline/*.md`.
-- The Area's explainer doc: `areas/Timeline.md`.
+- This Routine's home: `routines/timeline/` — its definition
+  (`routine.toml`), explainer doc (`Timeline.md`), and skills
+  (`routines/timeline/skills/*.md`, rituals like this one).
 - The exact directories and filename formats are configurable in
   `.breadpaper/config.toml` — read it first and honor any overrides.
 
@@ -84,6 +86,6 @@ Summarize in the conversation:
    directories if needed). Write a short version of the report as its body —
    one paragraph is plenty. This is how BreadPaper knows setup finished.
 2. Tell the user: **"BreadPaper will open your Timeline tour"** — the app
-   watches for that file and opens `areas/Timeline.md` with what this Area
-   can do. Point out they can rerun any of it later: `/wrap-today`,
-   `/wrap-yesterday`, `/week-review`, or this setup itself.
+   watches for that file and opens `routines/timeline/Timeline.md` with what
+   this Routine can do. Point out they can rerun any of it later:
+   `/wrap-today`, `/wrap-yesterday`, `/week-review`, or this setup itself.

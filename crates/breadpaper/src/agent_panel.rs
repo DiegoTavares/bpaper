@@ -14,6 +14,8 @@ use gpui::{
 };
 use picker::{Picker, PickerDelegate};
 use project::Project;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use terminal::Terminal;
@@ -24,8 +26,8 @@ use ui::{
     ListItemSpacing, ToggleState, Tooltip,
 };
 use util::ResultExt as _;
-use workspace::{ModalView, Workspace};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::{ModalView, Workspace};
 
 use crate::agent::{self, ConnectedAgent, KnownAgent};
 use crate::vault::{Vault, VaultStatus};
@@ -40,11 +42,20 @@ actions!(
         /// Starts a new conversation with the connected agent.
         NewConversation,
         /// Opens the guided flow for connecting a CLI agent.
-        ConnectAgent,
-        /// Runs an installed Area skill with your connected agent.
-        RunSkill
+        ConnectAgent
     ]
 );
+
+/// Runs an installed Routine skill with your connected agent. Without data
+/// it opens the skill picker; a keybinding can pass a skill id directly (V7
+/// §7.5), e.g. `["breadpaper::RunSkill", { "skill": "wrap-today" }]`.
+#[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = breadpaper)]
+#[serde(deny_unknown_fields)]
+pub struct RunSkill {
+    #[serde(default)]
+    pub skill: Option<String>,
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -59,11 +70,54 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.open_connect(window, cx));
             }
         });
-        workspace.register_action(|workspace, _: &RunSkill, window, cx| {
-            toggle_run_skill_picker(workspace, window, cx);
+        workspace.register_action(|workspace, action: &RunSkill, window, cx| {
+            match action.skill.as_deref() {
+                Some(skill_id) => run_skill_by_id(workspace, skill_id, window, cx),
+                None => toggle_run_skill_picker(workspace, window, cx),
+            }
         });
     })
     .detach();
+}
+
+/// The `breadpaper::RunSkill { skill }` keybinding path: launch an enabled
+/// Routine's skill by its manifest id. Unknown or disabled ids get a
+/// non-blocking toast, never a panic (V7 §7.5).
+fn run_skill_by_id(
+    workspace: &mut Workspace,
+    skill_id: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let root = workspace
+        .project()
+        .read(cx)
+        .visible_worktrees(cx)
+        .next()
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+    let Some(VaultStatus::Valid(vault)) = root.as_deref().map(Vault::detect) else {
+        workspace.show_error(
+            "This workspace isn't a BreadPaper vault, so there are no skills to run.".to_string(),
+            cx,
+        );
+        return;
+    };
+    let skill = crate::routines::enabled_routine_manifests(&vault)
+        .into_iter()
+        .flat_map(|manifest| manifest.skills)
+        .find(|skill| skill.id == skill_id);
+    match skill {
+        Some(skill) => AgentPanel::launch_in_workspace(
+            workspace,
+            LaunchRequest::run_skill(&skill.name, &skill.file),
+            window,
+            cx,
+        ),
+        None => workspace.show_error(
+            format!("No enabled Routine skill {skill_id:?} in this vault."),
+            cx,
+        ),
+    }
 }
 
 /// One agent action to launch in a fresh terminal tab (spec locked decision
@@ -150,17 +204,16 @@ impl AgentPanel {
         let project = workspace.project().clone();
         let weak_workspace = workspace.weak_handle();
         cx.new(|cx| {
-            let project_subscription =
-                cx.subscribe(&project, |this: &mut Self, _, event, cx| {
-                    if matches!(
-                        event,
-                        project::Event::WorktreeAdded(_)
-                            | project::Event::WorktreeRemoved(_)
-                            | project::Event::WorktreeUpdatedEntries(..)
-                    ) {
-                        this.refresh_vault_status(cx);
-                    }
-                });
+            let project_subscription = cx.subscribe(&project, |this: &mut Self, _, event, cx| {
+                if matches!(
+                    event,
+                    project::Event::WorktreeAdded(_)
+                        | project::Event::WorktreeRemoved(_)
+                        | project::Event::WorktreeUpdatedEntries(..)
+                ) {
+                    this.refresh_vault_status(cx);
+                }
+            });
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
@@ -226,8 +279,7 @@ impl AgentPanel {
     /// disk.
     fn refresh_connected(&mut self, cx: &mut Context<Self>) {
         let vault = self.vault().cloned();
-        let resolve =
-            cx.background_spawn(async move { agent::resolved_command(vault.as_ref()) });
+        let resolve = cx.background_spawn(async move { agent::resolved_command(vault.as_ref()) });
         cx.spawn(async move |this, cx| {
             let connected = resolve.await;
             this.update(cx, |this, cx| {
@@ -347,7 +399,8 @@ impl AgentPanel {
         let workspace = self.workspace.clone();
         let project = self.project.downgrade();
         let terminal_view = cx.new(|cx| {
-            let mut view = TerminalView::new(terminal.clone(), workspace, None, project, window, cx);
+            let mut view =
+                TerminalView::new(terminal.clone(), workspace, None, project, window, cx);
             view.set_show_workspace_actions(false, cx);
             view.set_custom_title(Some(title.clone()), cx);
             view
@@ -376,7 +429,10 @@ impl AgentPanel {
     /// shuts its process down — standard terminal semantics for a manual
     /// close; for a clean exit the process is already gone.
     fn remove_session(&mut self, session_id: usize, cx: &mut Context<Self>) {
-        let Some(index) = self.sessions.iter().position(|session| session.id == session_id)
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
         else {
             return;
         };
@@ -448,23 +504,21 @@ impl AgentPanel {
                 _ => agent::save_global_command(&command),
             }
         });
-        cx.spawn_in(window, async move |this, cx| {
-            match save.await {
-                Ok(()) => this.update_in(cx, |this, window, cx| {
-                    this.view = PanelView::Sessions;
-                    this.refresh_vault_status(cx);
-                    this.refresh_connected(cx);
-                    if let Some(request) = this.pending_launch.take() {
-                        this.launch(request, window, cx);
-                    }
-                    cx.notify();
-                }),
-                Err(error) => {
-                    this.update(cx, |this, cx| {
-                        this.show_error(format!("Couldn't save the connection: {error}"), cx);
-                    })?;
-                    Err(error)
+        cx.spawn_in(window, async move |this, cx| match save.await {
+            Ok(()) => this.update_in(cx, |this, window, cx| {
+                this.view = PanelView::Sessions;
+                this.refresh_vault_status(cx);
+                this.refresh_connected(cx);
+                if let Some(request) = this.pending_launch.take() {
+                    this.launch(request, window, cx);
                 }
+                cx.notify();
+            }),
+            Err(error) => {
+                this.update(cx, |this, cx| {
+                    this.show_error(format!("Couldn't save the connection: {error}"), cx);
+                })?;
+                Err(error)
             }
         })
         .detach_and_log_err(cx);
@@ -496,27 +550,30 @@ impl AgentPanel {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             ),
-            Some(detected) => {
-                content.children(detected.iter().map(|agent| {
-                    let program = agent.program;
-                    Button::new(
-                        ElementId::Name(SharedString::from(format!(
-                            "breadpaper-connect-{program}"
-                        ))),
-                        format!("{} ({program})", agent.display_name),
-                    )
-                    .style(ButtonStyle::Filled)
-                    .full_width()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.save_connection(program.to_string(), window, cx);
-                    }))
+            Some(detected) => content.children(detected.iter().map(|agent| {
+                let program = agent.program;
+                Button::new(
+                    ElementId::Name(SharedString::from(format!("breadpaper-connect-{program}"))),
+                    format!("{} ({program})", agent.display_name),
+                )
+                .style(ButtonStyle::Filled)
+                .full_width()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.save_connection(program.to_string(), window, cx);
                 }))
-            }
+            })),
         };
 
         content
             .child(Divider::horizontal())
-            .child(div().child(editor.clone()).px_1().py_1().border_1().rounded_sm())
+            .child(
+                div()
+                    .child(editor.clone())
+                    .px_1()
+                    .py_1()
+                    .border_1()
+                    .rounded_sm(),
+            )
             .child(
                 Label::new(format!(
                     "The kickoff prompt is appended as the last argument, or replaces \
@@ -557,9 +614,10 @@ impl AgentPanel {
                                 this.save_connection(command, window, cx);
                             })),
                     )
-                    .child(Button::new("breadpaper-connect-cancel", "Cancel").on_click(
-                        cx.listener(|this, _, _window, cx| this.cancel_connect(cx)),
-                    )),
+                    .child(
+                        Button::new("breadpaper-connect-cancel", "Cancel")
+                            .on_click(cx.listener(|this, _, _window, cx| this.cancel_connect(cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -611,11 +669,9 @@ impl AgentPanel {
                     )
                     .child(
                         div().mt_3().max_w(rems(16.)).child(
-                            Label::new(
-                                "Run skills from the Areas section of the Timeline panel.",
-                            )
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                            Label::new("Run skills from the Routines panel.")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
                         ),
                     )
             }
@@ -686,7 +742,11 @@ impl AgentPanel {
                     .child(
                         Label::new(session.title.clone())
                             .size(LabelSize::Small)
-                            .color(if is_active { Color::Default } else { Color::Muted }),
+                            .color(if is_active {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            }),
                     )
                     .child(
                         IconButton::new(
@@ -698,9 +758,11 @@ impl AgentPanel {
                         .icon_size(IconSize::XSmall)
                         .icon_color(Color::Muted)
                         .tooltip(Tooltip::text("Close session"))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.remove_session(session_id, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.remove_session(session_id, cx);
+                            },
+                        )),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(index) = this
@@ -837,19 +899,16 @@ struct RunnableSkill {
 }
 
 fn runnable_skills(vault: &Vault) -> Vec<RunnableSkill> {
-    crate::areas::enabled_areas(vault)
+    crate::routines::enabled_routine_manifests(vault)
         .into_iter()
         .flat_map(|manifest| {
-            let area_name = manifest.name.clone();
-            manifest
-                .skills
-                .into_iter()
-                .map(move |skill| RunnableSkill {
-                    label: format!("{} — {}", skill.name, area_name),
-                    skill_name: skill.name,
-                    file: skill.file,
-                    summary: skill.summary,
-                })
+            let routine_name = manifest.name.clone();
+            manifest.skills.into_iter().map(move |skill| RunnableSkill {
+                label: format!("{} — {}", skill.name, routine_name),
+                skill_name: skill.name,
+                file: skill.file,
+                summary: skill.summary,
+            })
         })
         .collect()
 }
@@ -878,7 +937,7 @@ fn toggle_run_skill_picker(
     };
     if skills.is_empty() {
         workspace.show_error(
-            "No Area skills are installed in this vault.".to_string(),
+            "No Routine skills are installed in this vault.".to_string(),
             cx,
         );
         return;

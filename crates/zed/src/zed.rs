@@ -772,8 +772,8 @@ fn show_software_emulation_warning_if_needed(
 
 fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<anyhow::Result<()>> {
     cx.spawn_in(window, async move |workspace_handle, cx| {
-        let breadpaper_timeline_panel =
-            breadpaper::TimelinePanel::load(workspace_handle.clone(), cx.clone());
+        let breadpaper_routines_panel =
+            breadpaper::RoutinesPanel::load(workspace_handle.clone(), cx.clone());
         let breadpaper_day_planner_panel =
             breadpaper::DayPlannerPanel::load(workspace_handle.clone(), cx.clone());
         let breadpaper_agent_panel =
@@ -804,7 +804,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         }
 
         futures::join!(
-            add_panel_when_ready(breadpaper_timeline_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(breadpaper_routines_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(
                 breadpaper_day_planner_panel,
                 workspace_handle.clone(),
