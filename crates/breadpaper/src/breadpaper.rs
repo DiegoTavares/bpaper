@@ -5,6 +5,7 @@ pub mod backlog_panel;
 pub mod day_plan;
 pub mod day_planner_panel;
 pub mod history;
+pub mod markdown_text;
 pub mod notes;
 pub mod routines;
 pub mod routines_panel;
