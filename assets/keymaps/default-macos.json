@@ -1708,4 +1708,19 @@
       "escape": "menu::Cancel",
     },
   },
+  {
+    "context": "BreadPaperBacklogPanel && !editing",
+    "use_key_equivalents": true,
+    "bindings": {
+      "left": "breadpaper::SelectPreviousBacklogColumn",
+      "right": "breadpaper::SelectNextBacklogColumn",
+      "space": "breadpaper::CompleteBacklogTask",
+      "x": "breadpaper::CompleteBacklogTask",
+      "shift-enter": "breadpaper::AddBacklogTask",
+      "alt-enter": "breadpaper::RevealBacklogTask",
+      "alt-left": "breadpaper::MoveBacklogTaskLeft",
+      "alt-right": "breadpaper::MoveBacklogTaskRight",
+      "cmd-c": "breadpaper::CopyBacklogTask",
+    },
+  },
 ]

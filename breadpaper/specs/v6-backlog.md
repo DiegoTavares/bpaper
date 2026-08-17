@@ -98,7 +98,8 @@ file = "backlog.md"    # vault-relative; default shown
 ### 6.1 The panel
 - A native GPUI `Panel` registered in the **bottom dock** (coexisting with the terminal), toggled via dock icon + keybinding, unique `activation_priority` (**10** — 0–9 are taken by upstream, Timeline, Day Planner, and Agent).
 - Renders two groups, **Soon** and **Someday**, each listing its open tasks in file order: a checkbox + the task text (children are not rendered in V6 — a child-count affordance is an open nicety, §9).
-- The **Completed** section renders as a collapsed group header (count only); expanding it lists dated completed tasks read-only. _(Confirm — §9.)_
+- The **Completed** section renders as a third column: a bare header, then the dated completed tasks, read-only, **most recent first** (the file stays append-ordered oldest-first; the reversal is display only, and undated hand-written completions sort last). No count — the number of things you have ever finished isn't a number worth a glance, unlike the open counts on Soon and Someday. _(Originally a collapsed group (§9.2); the collapse was dropped 2026-08-17 — with three side-by-side columns the chevron hid the audit trail for no gain, and a column the keyboard can enter has to be visible anyway.)_
+- Rows render inline Markdown links: `[name](url)` shows as *name*, styled and clickable (opens in the browser; the click does not fall through to the row's click-to-edit). Only absolute URLs become links — a malformed or relative link stays literal so nothing renders as a dead link, and the file and the inline editor always hold the raw Markdown. _(Added 2026-08-17; `markdown_text.rs`.)_
 - Empty backlog → gentle empty state ("Nothing in the backlog. Wrap skills can move unfinished tasks here.").
 - Non-vault workspace → standard non-vault state (as the other panels); no backlog is read.
 
@@ -127,6 +128,36 @@ The panel re-parses on any change to `backlog.md` — buffer edits when the file
 | Backlog write fails after note append | Toast stating the note was updated but the backlog wasn't; re-check is safe (the panel re-renders from the file, still showing the task open). |
 | Task line changed externally mid-edit | Commit re-locates the task by identity (section + text at edit start); if gone, drop the edit with a toast rather than guessing. |
 | Duplicate task text within a section | Allowed in the file; panel renders both; internal addressing is by line, not text. |
+
+### 6.6 Keyboard navigation (added 2026-08-17)
+
+The panel is a three-column grid — **Soon**, **Someday**, **Completed** — and the keyboard cursor is a
+`(column, row index)` pair. The index is re-clamped against the current parse every time it is read, so a
+re-parse (buffer edit, external change, a task moving out from under the cursor) moves the highlight instead
+of losing it. The selection also drives the click affordances: clicking a row selects it.
+
+| Gesture | Default keymap | With vim mode | Effect |
+|---|---|---|---|
+| Move within a column | `up` / `down` | `k` / `j` (counts supported) | Moves the cursor one row |
+| First / last row | `home` / `end` (via `menu`) | `g g` / `shift-g` | Jumps within the column |
+| Change column | `left` / `right` | `h` / `l` | Nearest column in that direction **that has rows** (empty columns are skipped rather than swallowing the cursor) |
+| Edit the task | `enter` | `i` | Opens the inline editor (§6.2) |
+| Add a task | `shift-enter` | `o` | Inline editor for a new task in the selected column |
+| Mark done | `space` / `x` | `space` / `x` | §6.3, on the selected task |
+| Move Soon ↔ Someday | `alt-right` / `alt-left` | `>` / `<` | Moves the *task*, and the cursor follows it into its new column |
+| Copy as Markdown | `cmd-c` / `ctrl-c` | `y y` | Copies the task's own text from the file — checkbox marker, completion stamp and indented children included — prefixed with a newline, so pasting lands it on its own line the way vim's linewise `yy` does. The row pulses for 200 ms (vim's `highlight_on_yank_duration` default), since a copy is otherwise silent |
+| Reveal in `backlog.md` | `alt-enter` | `g space` | §6.2's reveal, at the selected task's line |
+| Leave the panel | `escape` | `escape` | Cancels an in-flight inline edit, otherwise returns focus to the active editor |
+
+Completed is an audit trail, not an editable column (§4.3): `i`, `o`, `space` / `x`, `<` and `>` are no-ops
+there, while copy and reveal still work. Each open row carries a `‹`/`›` chevron move button, matching the
+`<` / `>` keys that do the same thing. Un-completing is deliberately not a panel gesture: mark-done's
+ordering invariant (§6.3) means the completion is also recorded in a daily note, and silently retracting a
+line the user's note already claims would break append-only. Re-opening a task stays a file edit.
+
+The panel's key context carries an `editing` flag while the inline editor is open, and the single-key
+bindings are gated on `!editing` — without it the panel's `i` / `o` / `space` bindings would shadow typing
+into the editor, which is a descendant of the panel element.
 
 ## 7. Wrap-skill capture (Timeline Area changes)
 

@@ -427,6 +427,14 @@ pub fn split_completion(text: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// A completed task's date, when it carries a parseable ` ✅ YYYY-MM-DD`
+/// suffix. `None` for hand-written completions the panel can't date — they sort
+/// last rather than pretending to a position in the history.
+pub fn completion_date(text: &str) -> Option<NaiveDate> {
+    let (_, date) = split_completion(text);
+    NaiveDate::parse_from_str(date?, "%Y-%m-%d").ok()
+}
+
 /// Normalizes task text for duplicate detection (spec §7.2):
 /// whitespace-insensitive, ignoring any completion-date suffix.
 pub fn normalize_task_text(text: &str) -> String {
@@ -748,6 +756,16 @@ Some orienting prose the model must never touch.
             split_completion("Emoji ✅ but not a date"),
             ("Emoji ✅ but not a date", None)
         );
+    }
+
+    #[test]
+    fn completion_date_parses_only_real_dates() {
+        assert_eq!(
+            completion_date("Book dentist ✅ 2026-07-23"),
+            NaiveDate::from_ymd_opt(2026, 7, 23)
+        );
+        assert_eq!(completion_date("No suffix"), None);
+        assert_eq!(completion_date("Malformed ✅ 2026-13-99"), None);
     }
 
     #[test]
