@@ -227,15 +227,6 @@ pub enum Reconciled {
     },
 }
 
-impl Reconciled {
-    pub fn edits(&self) -> &[LineEdit] {
-        match self {
-            Self::NoPlannerSection => &[],
-            Self::Edits { edits, .. } => edits,
-        }
-    }
-}
-
 /// The contract (spec §8): computes the minimal ordered edit list that brings
 /// the note's Calendar section in line with `events`. Inserts new meetings at
 /// their sorted position, corrects times on moved ones, marks cancelled ones,
@@ -273,8 +264,11 @@ pub fn reconcile(note: &str, events: &[CalendarEvent], config: &CalendarConfig) 
 
     let Some(section_range) = section else {
         // Created only on the first sync that yields at least one event —
-        // never speculatively (spec §5.1 rule 2, G6).
-        if !events.is_empty() {
+        // never speculatively (spec §5.1 rule 2, G6). A level-6 planner
+        // heading can have no child heading, so creating one would terminate
+        // the planner section and re-duplicate events on every poll; the
+        // events simply hold instead.
+        if !events.is_empty() && planner_level < 6 {
             edits.extend(section_creation_edits(
                 &lines,
                 &planner_range,
@@ -332,10 +326,9 @@ pub fn reconcile(note: &str, events: &[CalendarEvent], config: &CalendarConfig) 
     // Sorting applies to inserts only; existing lines are never reordered
     // (spec §8.2).
     inserts.sort_by(|a, b| event_sort_key(a).cmp(&event_sort_key(b)));
-    let fallback_row = synced
-        .last()
-        .map(|line| line.row + 1)
-        .unwrap_or_else(|| after_last_content_row(&lines, &section_range));
+    // Past the last synced line means past the whole section content, not
+    // right after that line — the user may have nested sub-bullets under it.
+    let fallback_row = after_last_content_row(&lines, &section_range);
     for event in inserts {
         let key = sort_start(event.time);
         let row = synced
@@ -489,8 +482,7 @@ fn section_creation_edits(
     if row > 0 && !lines[row - 1].trim().is_empty() {
         block.push(String::new());
     }
-    let level = (planner_level + 1).min(6);
-    block.push(format!("{} {}", "#".repeat(level), section));
+    block.push(format!("{} {}", "#".repeat(planner_level + 1), section));
     block.push(String::new());
     let mut sorted: Vec<&CalendarEvent> = events.iter().collect();
     sorted.sort_by(|a, b| event_sort_key(a).cmp(&event_sort_key(b)));
@@ -830,6 +822,37 @@ mod tests {
              - [ ] 15:00 - 16:00 Review <!--gcal:cccccccccccc-->\n\
              - [ ] 17:00 - 17:30 Late sync <!--gcal:dddddddddddd-->\n"
         );
+    }
+
+    #[test]
+    fn insert_after_the_last_synced_line_lands_below_its_sub_bullets() {
+        let note = "# Day planner\n\n## Calendar\n\n\
+                    - [x] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->\n\
+                    \t- prep the demo first\n";
+        let (applied, _) = run(
+            note,
+            &[
+                event("aaaaaaaaaaaa", "Standup", 600, 630),
+                event("bbbbbbbbbbbb", "Review", 900, 960),
+            ],
+        );
+        assert_eq!(
+            applied,
+            "# Day planner\n\n## Calendar\n\n\
+             - [x] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->\n\
+             \t- prep the demo first\n\
+             - [ ] 15:00 - 16:00 Review <!--gcal:bbbbbbbbbbbb-->\n"
+        );
+    }
+
+    #[test]
+    fn level_six_planner_heading_never_creates_the_section() {
+        let note = "###### Day planner\n\n- [ ] Workout\n";
+        let events = [event("aaaaaaaaaaaa", "Standup", 600, 630)];
+        let (applied, _) = run(note, &events);
+        assert_eq!(applied, note);
+        let (again, _) = run(&applied, &events);
+        assert_eq!(again, applied);
     }
 
     #[test]
