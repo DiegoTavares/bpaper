@@ -19,6 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::str::FromStr as _;
 use ui::prelude::*;
 use ui::{Button, Divider, Icon, IconButton, IconSize, Label, ListItem, Tooltip};
 use util::ResultExt as _;
@@ -116,22 +117,66 @@ fn new_routine_launch_request() -> crate::agent_panel::LaunchRequest {
 /// The Routine `icon` field's named subset of `IconName` (V7 decision 10).
 /// Unknown names and `None` fall back to `Blocks`. `ROUTINES.md` documents
 /// the list.
-fn routine_icon(name: Option<&str>) -> IconName {
-    match name.unwrap_or_default() {
-        "blocks" => IconName::Blocks,
-        "book" => IconName::Book,
-        "clock" => IconName::Clock,
-        "envelope" => IconName::Envelope,
-        "flame" => IconName::Flame,
-        "folder" => IconName::Folder,
-        "hash" => IconName::Hash,
-        "person" => IconName::Person,
-        "sparkle" => IconName::Sparkle,
-        "star" => IconName::Star,
-        "terminal" => IconName::Terminal,
-        "todo" => IconName::ListTodo,
-        _ => IconName::Blocks,
+/// An icon a manifest can ask for. Most are `IconName` variants, but a few
+/// useful glyphs (the browser link's `html`) only exist in the file-type icon
+/// set, which has no enum variant — hence the asset-path arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowIcon {
+    Named(IconName),
+    Path(&'static str),
+}
+
+impl RowIcon {
+    fn build(self) -> Icon {
+        match self {
+            Self::Named(name) => Icon::new(name),
+            Self::Path(path) => Icon::from_path(path),
+        }
     }
+}
+
+/// Resolves a manifest `icon = "…"` name. Aliases cover the names that don't
+/// match an `IconName` one-for-one; everything else is looked up as a
+/// snake_case `IconName`, so a Routine author can reach the whole icon set
+/// without the app maintaining a whitelist. Unknown names resolve to `None`
+/// so the caller can fall back to its own default.
+fn manifest_icon(name: &str) -> Option<RowIcon> {
+    match name {
+        "todo" => Some(RowIcon::Named(IconName::ListTodo)),
+        "html" => Some(RowIcon::Path("icons/file_icons/html.svg")),
+        other => IconName::from_str(other).ok().map(RowIcon::Named),
+    }
+}
+
+fn routine_icon(name: Option<&str>) -> RowIcon {
+    name.and_then(manifest_icon)
+        .unwrap_or(RowIcon::Named(IconName::Blocks))
+}
+
+/// A quick link's icon: the manifest's override, else a default that reflects
+/// where the link goes — a note, some other file, or out to the browser.
+fn link_icon(link: &RoutineLink) -> RowIcon {
+    link.icon
+        .as_deref()
+        .and_then(manifest_icon)
+        .unwrap_or_else(|| match link.kind {
+            LinkKind::Browser => RowIcon::Path("icons/file_icons/html.svg"),
+            LinkKind::Editor | LinkKind::Preview => {
+                if link.open.ends_with(".md") {
+                    RowIcon::Named(IconName::Notepad)
+                } else {
+                    RowIcon::Named(IconName::FileCode)
+                }
+            }
+        })
+}
+
+fn skill_icon(skill: &RoutineSkill) -> RowIcon {
+    skill
+        .icon
+        .as_deref()
+        .and_then(manifest_icon)
+        .unwrap_or(RowIcon::Named(IconName::AiGemini))
 }
 
 /// Shows the routines panel (opening the left dock) when the workspace is a
@@ -1433,7 +1478,8 @@ impl RoutinesPanel {
                 }
             }))
             .start_slot(
-                Icon::new(routine_icon(manifest.icon.as_deref()))
+                routine_icon(manifest.icon.as_deref())
+                    .build()
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
@@ -1481,18 +1527,8 @@ impl RoutinesPanel {
         section = section.children(manifest.links.iter().map(|link| {
             let index = *row_index;
             *row_index += 1;
-            // Every row carries an icon so labels stay aligned: an arrow for
-            // things that leave the editor, a file icon otherwise.
-            let icon = match link.kind {
-                LinkKind::Browser => IconName::ArrowUpRight,
-                LinkKind::Editor | LinkKind::Preview => {
-                    if link.open.ends_with(".md") {
-                        IconName::FileMarkdown
-                    } else {
-                        IconName::FileGeneric
-                    }
-                }
-            };
+            // Every row carries an icon so labels stay aligned.
+            let icon = link_icon(link);
             ListItem::new(ElementId::Name(SharedString::from(format!(
                 "breadpaper-link-{}-{}",
                 manifest.id, link.id
@@ -1500,11 +1536,7 @@ impl RoutinesPanel {
             .indent_level(1)
             .indent_step_size(px(12.))
             .toggle_state(selected_index == Some(index))
-            .start_slot(
-                Icon::new(icon)
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
-            )
+            .start_slot(icon.build().size(IconSize::XSmall).color(Color::Muted))
             .child(Label::new(link.name.clone()).size(LabelSize::Small))
             .on_click(cx.listener({
                 let routine_id = routine_id.clone();
@@ -1555,7 +1587,8 @@ impl RoutinesPanel {
             .indent_step_size(px(12.))
             .toggle_state(selected_index == Some(index))
             .start_slot(
-                Icon::new(IconName::Book)
+                skill_icon(skill)
+                    .build()
                     .size(IconSize::XSmall)
                     .color(Color::Muted),
             )
@@ -1717,7 +1750,8 @@ impl RoutinesPanel {
                         .indent_level(1)
                         .indent_step_size(px(12.))
                         .start_slot(
-                            Icon::new(routine_icon(manifest.icon.as_deref()))
+                            routine_icon(manifest.icon.as_deref())
+                                .build()
                                 .size(IconSize::XSmall)
                                 .color(Color::Muted),
                         )
@@ -1782,7 +1816,8 @@ impl RoutinesPanel {
                 .indent_level(1)
                 .indent_step_size(px(12.))
                 .start_slot(
-                    Icon::new(routine_icon(manifest.icon.as_deref()))
+                    routine_icon(manifest.icon.as_deref())
+                        .build()
                         .size(IconSize::XSmall)
                         .color(Color::Muted),
                 )
@@ -1982,5 +2017,87 @@ impl Panel for RoutinesPanel {
     fn activation_priority(&self) -> u32 {
         // Must be unique across all panels; 0-3 and 5-7 are taken upstream.
         4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(open: &str, kind: LinkKind, icon: Option<&str>) -> RoutineLink {
+        RoutineLink {
+            id: "row".into(),
+            name: "Row".into(),
+            open: open.into(),
+            kind,
+            icon: icon.map(str::to_string),
+            create: false,
+        }
+    }
+
+    fn skill(icon: Option<&str>) -> RoutineSkill {
+        RoutineSkill {
+            id: "row".into(),
+            name: "Row".into(),
+            file: "routines/x/skills/row.md".into(),
+            summary: String::new(),
+            icon: icon.map(str::to_string),
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn row_icons_default_by_kind() {
+        assert_eq!(
+            link_icon(&link("daily/2026-08-17.md", LinkKind::Editor, None)),
+            RowIcon::Named(IconName::Notepad)
+        );
+        assert_eq!(
+            link_icon(&link("daily/2026-08-17.md", LinkKind::Preview, None)),
+            RowIcon::Named(IconName::Notepad)
+        );
+        assert_eq!(
+            link_icon(&link("finance/ledger.csv", LinkKind::Editor, None)),
+            RowIcon::Named(IconName::FileCode)
+        );
+        assert_eq!(
+            link_icon(&link("weekly/site/index.html", LinkKind::Browser, None)),
+            RowIcon::Path("icons/file_icons/html.svg")
+        );
+        assert_eq!(skill_icon(&skill(None)), RowIcon::Named(IconName::AiGemini));
+    }
+
+    #[test]
+    fn manifest_icons_override_defaults_and_bad_names_fall_back() {
+        assert_eq!(
+            link_icon(&link("finance/plan.md", LinkKind::Editor, Some("hash"))),
+            RowIcon::Named(IconName::Hash)
+        );
+        // Any snake_case IconName works, not just a curated list.
+        assert_eq!(
+            skill_icon(&skill(Some("sparkle"))),
+            RowIcon::Named(IconName::Sparkle)
+        );
+        // Aliases for the names that have no one-for-one IconName.
+        assert_eq!(
+            manifest_icon("todo"),
+            Some(RowIcon::Named(IconName::ListTodo))
+        );
+        assert_eq!(
+            manifest_icon("html"),
+            Some(RowIcon::Path("icons/file_icons/html.svg"))
+        );
+        // A typo must not blank the row out.
+        assert_eq!(
+            link_icon(&link("finance/plan.md", LinkKind::Editor, Some("hashh"))),
+            RowIcon::Named(IconName::Notepad)
+        );
+        assert_eq!(
+            skill_icon(&skill(Some("nope"))),
+            RowIcon::Named(IconName::AiGemini)
+        );
+        assert_eq!(routine_icon(Some("nope")), RowIcon::Named(IconName::Blocks));
+        assert_eq!(routine_icon(None), RowIcon::Named(IconName::Blocks));
     }
 }

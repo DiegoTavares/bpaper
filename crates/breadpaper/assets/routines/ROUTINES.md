@@ -45,6 +45,7 @@ agent_doc = "routines/finance/AGENT.md"
 name = "Plan 2026"
 open = "finance/plan_2026.md"
 kind = "editor"
+icon = "hash"                   # optional; see the icon note below
 
 # `open` supports date templates, resolved from the vault's [daily]/[weekly]
 # config: {today} {yesterday} {tomorrow} {this_week} {last_week}
@@ -68,6 +69,7 @@ id      = "friday-finance"
 name    = "Friday Finance"
 file    = "routines/finance/skills/friday-finance.md"
 summary = "Pull live data, compute the sweep, log the outcome."
+icon    = "flame"               # optional; see the icon note below
 reads   = ["finance/**"]
 writes  = ["finance/plan_2026.md (edit, confirmed)", "daily/<today>.md (append)"]
 ```
@@ -79,9 +81,15 @@ Notes:
 - `reads`/`writes` are declared scope, shown to the user — not enforced.
 - `[[surface]]` (schema 1) still parses as a deprecated alias for
   `[[link]]` with `kind = "browser"`.
-- Icons come from a small named set: `blocks`, `book`, `clock`, `envelope`,
-  `flame`, `folder`, `hash`, `person`, `sparkle`, `star`, `terminal`,
-  `todo`. Anything else falls back to `blocks`.
+- `icon` is optional on the Routine, on each `[[link]]`, and on each
+  `[[skill]]`. It names an icon that ships with the app — pick from the
+  `assets/icons/` file names (`book`, `clock`, `envelope`, `flame`, `folder`,
+  `hash`, `notepad`, `person`, `sparkle`, `star`, `terminal`, …), plus two
+  aliases: `todo` and `html`. Icons can't be supplied as files.
+- Leave `icon` off and the row picks a sensible default: `notepad` for a
+  Markdown link, `file_code` for any other file, `html` for a browser link,
+  `ai_bedrock` for a skill, and `blocks` for the Routine itself. A name that
+  doesn't resolve falls back to that same default.
 
 ## Keyboard shortcuts
 

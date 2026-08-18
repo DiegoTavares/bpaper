@@ -69,7 +69,7 @@ Compat and migration notes:
 - **No runtime-registered action *types* per Routine.** GPUI actions are static types; a Routine can't mint an `OpenToday`-style action. Shortcuts are covered instead by two generic **parameterized actions** (§7.5); palette coverage stays picker-based (`RunSkillPicker`).
 - **No manifest-declared keybindings.** `routine.toml` never applies keybindings — a vault file silently rebinding keys is a trust problem. `ROUTINES.md` documents the binding snippet; an agent may offer to add it to the user's keymap with approval.
 - **No catalog deprecation.** The compiled catalog stays as the zero-setup path and the reconcile/update source for shipped Routines.
-- **No icon uploads** — Routine icons come from a small named subset of the existing `IconName` set, fallback `Blocks`.
+- **No icon uploads** — Routine, link, and skill icons name an icon that already ships with the app; a manifest can never point at an image file of its own.
 - **No product-name decision.** "BreadPaper" itself and the wider analogy question stay open; this rename settles only the bundle word.
 
 ## 5. Core concepts
@@ -99,7 +99,7 @@ id      = "finance"
 name    = "Finance"
 version = 1
 summary = "Monthly money rhythm — plans, reviews, and a net-worth dashboard."
-icon    = "wallet"                       # named subset of IconName; fallback: blocks
+icon    = "star"                         # any snake_case IconName; fallback: blocks
 doc     = "routines/finance/Finance.md"  # human explainer (viewing mode), as in V3
 
 # Optional agent-facing context: a file agents are pointed at before acting in
@@ -114,6 +114,7 @@ agent_doc = "routines/finance/AGENT.md"
 name = "Plan 2026"
 open = "finance/plan_2026.md"
 kind = "editor"                          # editor | preview | browser
+icon = "hash"                            # optional; defaults by kind (§7.4)
 
 [[link]]
 name = "This Month"
@@ -136,6 +137,7 @@ id      = "friday-finance"
 name    = "Friday Finance"
 file    = "routines/finance/skills/friday-finance.md"
 summary = "Pull live data, compute the sweep, log the outcome."
+icon    = "flame"                        # optional; defaults to ai_bedrock
 reads   = ["finance/**", "mcp:monarch"]
 writes  = ["finance/plan_2026.md (edit, confirmed)", "daily/<today>.md (append)"]
 
@@ -170,6 +172,7 @@ Rules and deltas from schema 1:
 
 ### 7.4 The navigation panel
 - Rendering: for each enabled Routine (registry order): header (icon, name, collapse toggle, remove/onboarding affordances as today) → link rows (`kind`-dispatched: editor open / `open_abs_path_as_preview` / `cx.open_with_system`) → skill rows (view + Run, unchanged) — replacing today's two-block `render_entries` + `render_areas_section` split (`timeline_panel.rs:986-1036`).
+- Row icons: every row carries one so labels stay aligned. `icon` on the `[[link]]`/`[[skill]]` wins; otherwise the default follows the row's kind — `notepad` for a Markdown link, `file_code` for any other file, `html` for a browser link, `ai_bedrock` for a skill. An unresolvable name falls back to that default rather than blanking the row (added 2026-08-17).
 - The Timeline Routine's manifest gains its four navigator rows as templated links (version bump; reconcile materializes the new manifest — user-modified manifests are preserved per the never-clobber discipline and simply miss the upgrade, with a log line; decision 8).
 - Keyboard selection generalizes from the `TIMELINE_ENTRIES`-bounded cursor (`timeline_panel.rs:946-984`) to a flat list of all visible rows; `active_entry_index`'s editor-follows-highlight generalizes to "the link whose resolved path matches the active editor".
 - Non-vault / invalid states unchanged. Panel identity (dock, `activation_priority`) unchanged — this is a rewrite of the render body and selection model, not a new panel. The panel's display name becomes **"Routines"** (decision 5).
@@ -221,6 +224,6 @@ _File references use the pre-rename names; the rename is a mechanical sweep over
 7. **`agent_doc`:** **convention only** — bridges and rituals mention it; no app-injected kickoff plumbing.
 8. **Timeline manifest migration:** user-edited manifests keep their edits and miss the link-rows upgrade; a log line records the skipped upgrade. No merge story, no prompt.
 9. **Skills location:** skills live **inside `routines/<id>/skills/`** — one folder holds everything about a Routine. (Timeline's legacy `skills/timeline/` files migrate conservatively per §2.)
-10. **Icons:** ship in Phase 1 — `icon` field over a small named `IconName` subset (~10), fallback `Blocks`.
+10. **Icons:** ship in Phase 1 — `icon` field over a small named `IconName` subset (~10), fallback `Blocks`. _(Widened 2026-08-17: `icon` is also accepted on `[[link]]` and `[[skill]]`, and any snake_case `IconName` resolves, not just the original subset. Unknown names fall back to the row's kind default rather than erroring.)_
 11. **Trust framing:** **provenance hint only** ("created in this vault") in the picker and removal dialog; scope enforcement stays M2.
 12. **Keybindable entries (added 2026-08-07, follow-up):** two generic parameterized actions — `breadpaper::OpenLink { routine, link }` and `breadpaper::RunSkill { skill }` — ship in Phase 1 so any Routine entry can get a user shortcut. Manifests never apply keybindings themselves; `ROUTINES.md` documents the snippet.

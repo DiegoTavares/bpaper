@@ -149,6 +149,7 @@ struct RoutineLinkContent {
     name: String,
     open: String,
     kind: Option<String>,
+    icon: Option<String>,
     #[serde(default)]
     create: bool,
     #[serde(flatten)]
@@ -179,6 +180,7 @@ impl RoutineLinkContent {
             name: self.name,
             open: self.open,
             kind,
+            icon: self.icon.filter(|icon| !icon.is_empty()),
             create: self.create,
         }
     }
@@ -204,6 +206,7 @@ impl RoutineSurfaceContent {
             name: self.name,
             open: self.open,
             kind: LinkKind::Browser,
+            icon: None,
             create: false,
         }
     }
@@ -238,6 +241,7 @@ struct RoutineSkillContent {
     name: String,
     file: String,
     summary: Option<String>,
+    icon: Option<String>,
     #[serde(default)]
     reads: Vec<String>,
     #[serde(default)]
@@ -254,6 +258,7 @@ impl RoutineSkillContent {
             name: self.name,
             file: self.file,
             summary: self.summary.unwrap_or_default(),
+            icon: self.icon.filter(|icon| !icon.is_empty()),
             reads: self.reads,
             writes: self.writes,
         }
@@ -338,6 +343,10 @@ pub struct RoutineLink {
     /// Vault-relative path, possibly containing date templates (§6).
     pub open: String,
     pub kind: LinkKind,
+    /// Named icon overriding the row default; `None` or an unknown name
+    /// falls back to the default for the link's kind (the panel owns the
+    /// mapping).
+    pub icon: Option<String>,
     /// Create the target from the matching note template when missing,
     /// like the core Today action.
     pub create: bool,
@@ -364,6 +373,9 @@ pub struct RoutineSkill {
     /// Vault-relative path of the skill file.
     pub file: String,
     pub summary: String,
+    /// Named icon overriding the row default; `None` or an unknown name
+    /// falls back to the skill default (the panel owns the mapping).
+    pub icon: Option<String>,
     /// Declared read scope; surfaced only, not enforced.
     pub reads: Vec<String>,
     /// Declared write scope; surfaced only, not enforced.
@@ -390,6 +402,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         name: &'a str,
         open: &'a str,
         kind: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        icon: Option<&'a str>,
         #[serde(skip_serializing_if = "is_false")]
         create: bool,
     }
@@ -409,6 +423,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         file: &'a str,
         #[serde(skip_serializing_if = "str::is_empty")]
         summary: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        icon: Option<&'a str>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         reads: &'a Vec<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -460,6 +476,7 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 name: &link.name,
                 open: &link.open,
                 kind: link.kind.as_str(),
+                icon: link.icon.as_deref(),
                 create: link.create,
             })
             .collect(),
@@ -487,6 +504,7 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 name: &skill.name,
                 file: &skill.file,
                 summary: &skill.summary,
+                icon: skill.icon.as_deref(),
                 reads: &skill.reads,
                 writes: &skill.writes,
             })
@@ -1803,6 +1821,42 @@ mod tests {
         assert_eq!(manifest.links[0].id, "my-dashboard");
         assert_eq!(manifest.links[0].kind, LinkKind::Browser);
         assert_eq!(manifest.links[0].open, "site/index.html");
+    }
+
+    #[test]
+    fn per_item_icons_parse_and_round_trip() {
+        let source = r#"
+            schema = 2
+            id = "finance"
+            name = "Finance"
+            doc = "routines/finance/Finance.md"
+            [[link]]
+            name = "Plan"
+            open = "finance/plan.md"
+            icon = "hash"
+            [[link]]
+            name = "Ledger"
+            open = "finance/ledger.csv"
+            [[skill]]
+            id = "close-month"
+            name = "Close Month"
+            file = "routines/finance/skills/close-month.md"
+            icon = "envelope"
+            [[skill]]
+            id = "reconcile"
+            name = "Reconcile"
+            file = "routines/finance/skills/reconcile.md"
+            "#;
+        let manifest = parse_manifest(source).unwrap();
+        assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+        assert_eq!(manifest.links[0].icon.as_deref(), Some("hash"));
+        assert_eq!(manifest.links[1].icon, None);
+        assert_eq!(manifest.skills[0].icon.as_deref(), Some("envelope"));
+        assert_eq!(manifest.skills[1].icon, None);
+
+        // Migration rewrites the definition; the icons must survive it.
+        let rendered = render_manifest_toml(&manifest).unwrap();
+        assert_eq!(parse_manifest(&rendered).unwrap(), manifest);
     }
 
     #[test]
