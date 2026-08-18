@@ -1,7 +1,7 @@
 schema  = 2
 id      = "timeline"
 name    = "Daily & Weekly"
-version = 3
+version = 4
 summary = "Daily & weekly rhythm — weekly review and a progress dashboard."
 icon    = "clock"
 doc     = "routines/timeline/Timeline.md"
@@ -81,6 +81,14 @@ file    = "routines/timeline/skills/wrap-yesterday.md"
 summary = "Close out yesterday's note — tasks + commits + surrounding context, append a daily closure."
 reads   = ["daily/**", "backlog.md", "git:log", "mcp:github", "mcp:gitlab"]
 writes  = ["daily/<yesterday>.md (append)", "backlog.md (append)"]
+
+[[skill]]
+id      = "connect-calendar"
+name    = "Connect Calendar"
+file    = "routines/timeline/skills/connect-calendar.md"
+summary = "Link a Google Calendar so today's meetings appear in today's note."
+reads   = ["google:calendar (read-only)"]
+writes  = [".thock/calendar.toml", "daily/<today>.md (Calendar section)"]
 
 [[skill]]
 id      = "onboarding"

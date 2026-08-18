@@ -29,7 +29,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 3
+version = 4
 "#;
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
@@ -211,6 +211,10 @@ struct DayPlannerConfigContent {
     default_duration_minutes: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     show_now_indicator: Option<bool>,
+    /// Palette-index pins for subsection colours (spec v8 §7.3). A `BTreeMap`
+    /// so re-serialization is deterministic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sections: Option<std::collections::BTreeMap<String, usize>>,
 }
 
 impl DayPlannerConfigContent {
@@ -256,6 +260,12 @@ impl DayPlannerConfigContent {
             show_now_indicator: self
                 .show_now_indicator
                 .unwrap_or(defaults.show_now_indicator),
+            sections: self
+                .sections
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, index)| (name.trim().to_lowercase(), index))
+                .collect(),
         }
     }
 
@@ -265,6 +275,7 @@ impl DayPlannerConfigContent {
             && self.day_end.is_none()
             && self.default_duration_minutes.is_none()
             && self.show_now_indicator.is_none()
+            && self.sections.is_none()
     }
 }
 
@@ -751,7 +762,7 @@ mod tests {
         assert_eq!(vault.config.history, VaultConfig::default().history);
         assert_eq!(
             vault.config.routines.installed,
-            vec![InstalledRoutine::new("timeline".to_string(), true, 3)]
+            vec![InstalledRoutine::new("timeline".to_string(), true, 4)]
         );
         assert!(dir.path().join("daily").is_dir());
         assert!(dir.path().join("weekly").is_dir());
@@ -926,6 +937,28 @@ mod tests {
                 assert_eq!(config.day_end, 1440);
                 assert_eq!(config.default_duration, 45);
                 assert!(config.show_now_indicator);
+            }
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn day_planner_sections_parse_with_lowercased_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[day_planner.sections]\nMeetings = 3\nCalendar = 5\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => {
+                let sections = &vault.config.day_planner.sections;
+                assert_eq!(sections.get("meetings"), Some(&3));
+                assert_eq!(sections.get("calendar"), Some(&5));
+                // The rest of the table keeps its defaults.
+                assert_eq!(vault.config.day_planner.heading, "Day planner");
             }
             other => panic!("expected valid vault, got {other:?}"),
         }
