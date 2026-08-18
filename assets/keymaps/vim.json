@@ -1063,7 +1063,7 @@
     },
   },
   {
-    "context": "ThockTimelinePanel",
+    "context": "ThockRoutinesPanel",
     "bindings": {
       "j": "vim::MenuSelectNext",
       "k": "vim::MenuSelectPrevious",
