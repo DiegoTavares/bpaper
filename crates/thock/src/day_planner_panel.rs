@@ -2,7 +2,9 @@
 //! right-dock panel that follows the active editor item. When that item is a
 //! daily note of the current vault, its checklist is parsed into a vertical
 //! day grid — timed tasks as duration-scaled blocks, unscheduled tasks as
-//! chips. Read-only; the one interaction is reveal-on-click into the editor.
+//! chips. When no daily note is active it falls back to today's note,
+//! opened as a background buffer. Read-only; the one interaction is
+//! reveal-on-click into the editor.
 
 use anyhow::Result;
 use chrono::{Local, NaiveDate, Timelike as _};
@@ -11,6 +13,7 @@ use gpui::{
     Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     Pixels, Subscription, Task, WeakEntity, Window, actions, div, px, relative,
 };
+use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBufferRow;
 use project::Project;
 use std::time::Duration;
@@ -25,7 +28,7 @@ use crate::calendar_service::{
     self, CalendarService, ConnectCalendar, SyncCalendarNow, SyncState,
 };
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
-use crate::notes::format_date;
+use crate::notes::{NoteKind, format_date};
 use crate::vault::VaultStatus;
 
 const DAY_PLANNER_PANEL_KEY: &str = "ThockDayPlannerPanel";
@@ -57,12 +60,19 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// Where the mirrored note's text comes from: the active editor when it is
+/// a daily note, or today's note opened as a background buffer otherwise.
+enum NoteSource {
+    Editor(WeakEntity<Editor>),
+    Buffer(Entity<Buffer>),
+}
+
 /// The daily note currently mirrored by the panel.
 struct ActiveNote {
-    editor: WeakEntity<Editor>,
+    source: NoteSource,
     date: NaiveDate,
     plan: DayPlan,
-    _editor_subscription: Subscription,
+    _source_subscription: Subscription,
 }
 
 pub struct DayPlannerPanel {
@@ -76,6 +86,7 @@ pub struct DayPlannerPanel {
     /// Panel-local UI state: the last clicked block/chip (spec §8).
     selected_item: Option<usize>,
     reparse_task: Option<Task<()>>,
+    fallback_open_task: Option<Task<()>>,
     /// Coarse repaint driver for the "now" line.
     _now_tick: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -122,7 +133,11 @@ impl DayPlannerPanel {
             let now_tick = cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(60)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    let tick = this.update(cx, |this, cx| {
+                        this.update_active_item(false, cx);
+                        cx.notify();
+                    });
+                    if tick.is_err() {
                         break;
                     }
                 }
@@ -142,6 +157,7 @@ impl DayPlannerPanel {
                 active: None,
                 selected_item: None,
                 reparse_task: None,
+                fallback_open_task: None,
                 _now_tick: now_tick,
                 _subscriptions: subscriptions,
             };
@@ -188,42 +204,117 @@ impl DayPlannerPanel {
     }
 
     /// Re-resolves the active editor item (spec §9.1): when it is a daily
-    /// note of the vault, mirror it; otherwise fall back to the hint state.
+    /// note of the vault, mirror it; otherwise fall back to today's note.
     /// `force_reparse` re-parses even when the active note is unchanged,
     /// for when the vault config changed under it.
     fn update_active_item(&mut self, force_reparse: bool, cx: &mut Context<Self>) {
-        let resolved = self.resolve_active_daily_note(cx);
-        let unchanged = match (&self.active, &resolved) {
-            (Some(active), Some((editor, date))) => {
-                active.editor.entity_id() == editor.entity_id() && active.date == *date
-            }
-            (None, None) => true,
-            _ => false,
+        let Some((editor, date)) = self.resolve_active_daily_note(cx) else {
+            self.fall_back_to_today(force_reparse, cx);
+            return;
         };
-        if unchanged {
+        self.fallback_open_task = None;
+        if let Some(active) = &self.active
+            && let NoteSource::Editor(existing) = &active.source
+            && existing.entity_id() == editor.entity_id()
+            && active.date == date
+        {
             if force_reparse {
                 self.reparse(cx);
             }
             return;
         }
+        let subscription = cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::BufferEdited) {
+                this.schedule_reparse(cx);
+            }
+        });
+        let plan = self.parse_editor_plan(&editor, cx);
+        self.set_active(
+            Some(ActiveNote {
+                source: NoteSource::Editor(editor.downgrade()),
+                date,
+                plan,
+                _source_subscription: subscription,
+            }),
+            cx,
+        );
+    }
+
+    /// Mirror today's note when the active item is not a daily note. The
+    /// note is opened as a background buffer, so edits made in other panes
+    /// and disk changes (calendar sync, agents) still reach the panel; a
+    /// note that does not exist yet renders as an empty day.
+    fn fall_back_to_today(&mut self, force_reparse: bool, cx: &mut Context<Self>) {
+        let today = Local::now().date_naive();
+        let note_path = match &self.vault_status {
+            VaultStatus::Valid(vault) => vault.note_path(NoteKind::Daily, today),
+            _ => {
+                self.fallback_open_task = None;
+                if self.active.is_some() {
+                    self.set_active(None, cx);
+                }
+                return;
+            }
+        };
+        if let Some(active) = &self.active
+            && matches!(active.source, NoteSource::Buffer(_))
+            && active.date == today
+        {
+            if force_reparse {
+                self.reparse(cx);
+            }
+            return;
+        }
+        let Some(project_path) = self
+            .project
+            .read(cx)
+            .project_path_for_absolute_path(&note_path, cx)
+        else {
+            self.fallback_open_task = None;
+            if self.active.is_some() {
+                self.set_active(None, cx);
+            }
+            return;
+        };
+        let open_buffer = self
+            .project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx));
+        self.fallback_open_task = Some(cx.spawn(async move |this, cx| {
+            let Some(buffer) = open_buffer.await.log_err() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                // The active item may have become a daily note while the
+                // open was in flight; it wins over the fallback.
+                if this.resolve_active_daily_note(cx).is_some() {
+                    return;
+                }
+                let subscription =
+                    cx.subscribe(&buffer, |this, _, event: &BufferEvent, cx| {
+                        if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
+                            this.schedule_reparse(cx);
+                        }
+                    });
+                let plan = this.parse_text_plan(&buffer.read(cx).text());
+                this.set_active(
+                    Some(ActiveNote {
+                        source: NoteSource::Buffer(buffer),
+                        date: today,
+                        plan,
+                        _source_subscription: subscription,
+                    }),
+                    cx,
+                );
+            })
+            .log_err();
+        }));
+    }
+
+    fn set_active(&mut self, active: Option<ActiveNote>, cx: &mut Context<Self>) {
         self.clear_transient_highlight(cx);
         self.selected_item = None;
         self.reparse_task = None;
-        self.active = resolved.map(|(editor, date)| {
-            let editor_subscription =
-                cx.subscribe(&editor, |this, _, event: &EditorEvent, cx| {
-                    if matches!(event, EditorEvent::BufferEdited) {
-                        this.schedule_reparse(cx);
-                    }
-                });
-            let plan = self.parse_editor_plan(&editor, cx);
-            ActiveNote {
-                editor: editor.downgrade(),
-                date,
-                plan,
-                _editor_subscription: editor_subscription,
-            }
-        });
+        self.active = active;
         cx.notify();
     }
 
@@ -241,11 +332,15 @@ impl DayPlannerPanel {
     }
 
     fn parse_editor_plan(&self, editor: &Entity<Editor>, cx: &App) -> DayPlan {
+        let text = editor.read(cx).buffer().read(cx).snapshot(cx).text();
+        self.parse_text_plan(&text)
+    }
+
+    fn parse_text_plan(&self, text: &str) -> DayPlan {
         let VaultStatus::Valid(vault) = &self.vault_status else {
             return DayPlan::default();
         };
-        let text = editor.read(cx).buffer().read(cx).snapshot(cx).text();
-        parse_day_plan(&text, &vault.config.day_planner)
+        parse_day_plan(text, &vault.config.day_planner)
     }
 
     fn schedule_reparse(&mut self, cx: &mut Context<Self>) {
@@ -259,10 +354,15 @@ impl DayPlannerPanel {
         let Some(active) = &self.active else {
             return;
         };
-        let Some(editor) = active.editor.upgrade() else {
-            return;
+        let plan = match &active.source {
+            NoteSource::Editor(editor) => {
+                let Some(editor) = editor.upgrade() else {
+                    return;
+                };
+                self.parse_editor_plan(&editor, cx)
+            }
+            NoteSource::Buffer(buffer) => self.parse_text_plan(&buffer.read(cx).text()),
         };
-        let plan = self.parse_editor_plan(&editor, cx);
         if let Some(active) = &mut self.active
             && active.plan != plan
         {
@@ -276,7 +376,8 @@ impl DayPlannerPanel {
 
     fn clear_transient_highlight(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = &self.active
-            && let Some(editor) = active.editor.upgrade()
+            && let NoteSource::Editor(editor) = &active.source
+            && let Some(editor) = editor.upgrade()
         {
             editor.update(cx, |editor, cx| {
                 editor.clear_row_highlights::<DayPlannerHighlight>();
@@ -296,9 +397,66 @@ impl DayPlannerPanel {
             return;
         };
         let row = item.row;
-        let Some(editor) = active.editor.upgrade() else {
+        let editor = match &active.source {
+            NoteSource::Editor(editor) => {
+                let Some(editor) = editor.upgrade() else {
+                    return;
+                };
+                editor
+            }
+            NoteSource::Buffer(_) => {
+                self.open_today_and_reveal(row, item_index, window, cx);
+                return;
+            }
+        };
+        Self::reveal_in_editor(&editor, row, window, cx);
+        self.selected_item = Some(item_index);
+        cx.notify();
+    }
+
+    /// The fallback note has no editor to reveal into: open today's note in
+    /// the workspace, then reveal once the editor exists. Deferred to a task
+    /// so the workspace is never re-entered from inside a panel update.
+    fn open_today_and_reveal(
+        &mut self,
+        row: u32,
+        item_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = &self.active else {
             return;
         };
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return;
+        };
+        let note_path = vault.note_path(NoteKind::Daily, active.date);
+        let Some(project_path) = self
+            .project
+            .read(cx)
+            .project_path_for_absolute_path(&note_path, cx)
+        else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let open_task = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })?;
+            let item = open_task.await?;
+            if let Some(editor) = item.downcast::<Editor>() {
+                this.update_in(cx, |this, window, cx| {
+                    Self::reveal_in_editor(&editor, row, window, cx);
+                    this.selected_item = Some(item_index);
+                    cx.notify();
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn reveal_in_editor(editor: &Entity<Editor>, row: u32, window: &mut Window, cx: &mut App) {
         editor.update(cx, |editor, cx| {
             let snapshot = editor.buffer().read(cx).snapshot(cx);
             // Clip, don't index: the note may have shrunk since the parse.
@@ -331,8 +489,6 @@ impl DayPlannerPanel {
             );
             editor.focus_handle(cx).focus(window, cx);
         });
-        self.selected_item = Some(item_index);
-        cx.notify();
     }
 
     /// The calendar-sync status row (spec v8 §10.3), shown only when the

@@ -27,7 +27,7 @@ This realizes VISION Milestone 3's first slice — the day-planner Context rail 
 4. Two tasks whose times overlap render **side by side** in separate columns, neither obscuring the other.
 5. **Clicking** any block or chip **selects + scrolls to** that task's line in the active editor and paints a transient row highlight; nothing in the note is modified.
 6. Editing a task's time/text/checkbox in the editor updates the grid **live** (within a short debounce), without a manual refresh.
-7. When the active item is **not a daily note** (or not a vault), the panel shows a gentle hint state, not a crash or blank.
+7. When the active item is **not a daily note**, the panel falls back to **today's note** (opened as a background buffer); only a non-vault window shows a gentle hint state, never a crash or blank.
 8. The panel is a native right-dock GPUI `Panel` with a **unique `activation_priority`**, a small isolated diff in the `thock` crate.
 
 ## 3. Non-goals (explicitly out of V4)
@@ -43,7 +43,7 @@ This realizes VISION Milestone 3's first slice — the day-planner Context rail 
 ## 4. Core concepts
 
 ### 4.1 Page-aware Context panel
-Unlike the Timeline panel (which reflects the *vault*), this panel reflects the **active editor item**. It subscribes to `workspace::Event::ActiveItemChanged`; whenever the active item resolves to a **daily note** in the current vault, the panel parses that note's buffer and renders its schedule. Otherwise it shows a hint state (§7.4). This "the right rail follows the open document" behavior is the reusable primitive VISION §5.3 describes; V4 builds it once, for daily notes.
+Unlike the Timeline panel (which reflects the *vault*), this panel reflects the **active editor item**. It subscribes to `workspace::Event::ActiveItemChanged`; whenever the active item resolves to a **daily note** in the current vault, the panel parses that note's buffer and renders its schedule. Otherwise it falls back to **today's note**, opened as a background buffer so edits elsewhere and disk changes still flow in (a hint state remains for non-vault windows, §7.4). This "the right rail follows the open document" behavior is the reusable primitive VISION §5.3 describes; V4 builds it once, for daily notes.
 
 ### 4.2 Timed task, unscheduled task
 The panel's model of the note is a list of **items**, each derived from one Markdown checkbox line (§5). An item is either:
@@ -193,7 +193,7 @@ The highlight is transient: it is cleared and repainted on the next click, and c
 ## 9. Behavior specification
 
 ### 9.1 Activation & data flow
-- The panel subscribes to `workspace::Event::ActiveItemChanged`. On change, it resolves the active item's path (mirror `active_item_path` in `timeline_panel.rs:607`) and asks the vault whether that path is a **daily note** (`Vault::note_path(NoteKind::Daily, date)` round-trip, or a reverse `daily_note_date(path)` helper on `Vault`). If yes, capture a `WeakEntity<Editor>` and its buffer, parse, render. If no, hint state (§9.4).
+- The panel subscribes to `workspace::Event::ActiveItemChanged`. On change, it resolves the active item's path (mirror `active_item_path` in `timeline_panel.rs:607`) and asks the vault whether that path is a **daily note** (`Vault::note_path(NoteKind::Daily, date)` round-trip, or a reverse `daily_note_date(path)` helper on `Vault`). If yes, capture a `WeakEntity<Editor>` and its buffer, parse, render. If no, fall back to **today's note**: open it as a background buffer via `Project::open_buffer` (a missing note yields an empty in-memory buffer, rendered as an empty day), re-parse on buffer edit/reload events, and roll over to the new date at midnight via the minute tick. Clicking a block in the fallback opens the note in the workspace, then reveals the line.
 - On the **active editor's buffer** emitting an edit event, **re-parse** (debounced ≈150ms via a GPUI executor timer) and `cx.notify()`. Store the parsed model against the buffer so redundant re-parses are skipped.
 - Parsing is cheap (a single pass over the planner section) and runs on the **foreground**; no background thread needed. (If a note is pathologically large this can move to `background_spawn`; flagged §9, not required for V4.)
 
@@ -203,7 +203,8 @@ The highlight is transient: it is cleared and repainted on the next click, and c
 | Active = today's daily note, has timed tasks | Full grid + now line + unscheduled strip. |
 | Active = a daily note, no timed/unscheduled tasks | Empty grid with a hint: *"No tasks yet. Add `- [ ] 09:00 – 10:00 Task` under your Day planner heading."* |
 | Active = a daily note, only unscheduled tasks | Grid (empty of blocks) + the chip strip. |
-| Active = non-daily note, or non-note, or not a vault | Muted hint: *"Open a daily note to see its schedule."* No grid. |
+| Active = non-daily note, or non-note | Today's note in the same states as above (empty day if it doesn't exist yet). |
+| Not a vault | Muted hint: *"Open a daily note to see its schedule."* No grid. |
 
 ### 9.3 Live update guarantees
 Any edit to the note that changes a task's time, label, checkbox, or membership updates the grid within the debounce window. Deleting the planner heading falls back to whole-file parsing (§5.2) automatically on the next parse. Toggling `[ ]`↔`[x]` in the editor re-styles the block (done/strikethrough) live.
