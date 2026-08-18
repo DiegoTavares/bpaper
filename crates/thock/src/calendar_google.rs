@@ -425,13 +425,17 @@ fn url_path_escape(segment: &str) -> String {
 /// The local day as RFC 3339 bounds: `[00:00 today, 00:00 tomorrow)`.
 fn day_window(date: NaiveDate) -> Result<(String, String)> {
     let bound = |date: NaiveDate| -> Result<String> {
-        let midnight = date
-            .and_hms_opt(0, 0, 0)
-            .context("invalid midnight")?
-            .and_local_timezone(Local)
-            .earliest()
-            .context("could not resolve local midnight")?;
-        Ok(midnight.to_rfc3339())
+        // Some zones spring forward at midnight (e.g. Cuba), so 00:00 may not
+        // exist; fall back to the first wall-clock hour that does.
+        for hour in [0, 1, 2, 3] {
+            let start = date
+                .and_hms_opt(hour, 0, 0)
+                .and_then(|naive| naive.and_local_timezone(Local).earliest());
+            if let Some(start) = start {
+                return Ok(start.to_rfc3339());
+            }
+        }
+        Err(anyhow!("could not resolve a local start of day for {date}"))
     };
     Ok((
         bound(date)?,

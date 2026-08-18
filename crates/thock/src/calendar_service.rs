@@ -79,6 +79,10 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ConnectCalendar, window, cx| {
             let workspace_handle = workspace.weak_handle();
             if let Some(service) = service_for_workspace(workspace, cx) {
+                if !service.read(cx).has_vault() {
+                    show_no_vault_error(workspace, cx);
+                    return;
+                }
                 service.update(cx, |service, cx| {
                     service.connect(workspace_handle, window, cx)
                 });
@@ -87,6 +91,10 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ChooseCalendars, window, cx| {
             let workspace_handle = workspace.weak_handle();
             if let Some(service) = service_for_workspace(workspace, cx) {
+                if !service.read(cx).has_vault() {
+                    show_no_vault_error(workspace, cx);
+                    return;
+                }
                 service.update(cx, |service, cx| {
                     service.choose_calendars(workspace_handle, window, cx)
                 });
@@ -121,6 +129,13 @@ pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity
 
 fn service_for_workspace(workspace: &Workspace, cx: &App) -> Option<Entity<CalendarService>> {
     service_for_project(workspace.project(), cx)
+}
+
+fn show_no_vault_error(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    workspace.show_error(
+        "This workspace isn't a Thock vault, so there is no calendar to connect.".to_string(),
+        cx,
+    );
 }
 
 /// What the Day Planner's status row shows (spec §10.3).
@@ -194,6 +209,12 @@ impl CalendarService {
 
     pub fn state(&self) -> &SyncState {
         &self.state
+    }
+
+    /// Whether this project is a Thock vault; without one there is nothing
+    /// for the calendar actions to act on.
+    pub fn has_vault(&self) -> bool {
+        self.vault.is_some()
     }
 
     /// Whether the status row should be shown at all: only when the vault
@@ -1060,5 +1081,64 @@ mod tests {
             text.contains("- [x] 11:00 - 11:30 ~~Standup~~ (cancelled) <!--gcal:aaaaaaaaaaaa-->"),
             "cancellation not marked:\n{text}"
         );
+    }
+
+    #[gpui::test]
+    async fn sync_edits_an_open_note_through_its_buffer(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let today = Local::now().date_naive();
+        let note_path = PathBuf::from(format!("/vault/daily/{}.md", today.format("%Y-%m-%d")));
+        let original = "# Monday\n\n## Day planner\n\n- [ ] Workout\n";
+        fs.create_dir(Path::new("/vault/daily")).await.unwrap();
+        fs.insert_file(&note_path, original.as_bytes().to_vec()).await;
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+
+        let buffer = project
+            .update(cx, |project, cx| project.open_local_buffer(&note_path, cx))
+            .await
+            .unwrap();
+
+        let service = cx.new(|cx| CalendarService::new(project.clone(), cx));
+        let provider = Arc::new(StubProvider {
+            events: Mutex::new(vec![CalendarEvent {
+                id: "aaaaaaaaaaaa".to_string(),
+                title: "Standup".to_string(),
+                time: Some((600, 630)),
+            }]),
+        });
+        let vault = Vault {
+            root: PathBuf::from("/vault"),
+            config: VaultConfig::default(),
+        };
+        let mut config = CalendarConfig::with_planner_heading("Day planner");
+        config.account = Some("diego@example.com".to_string());
+        config.calendars = vec!["primary".to_string()];
+        service.update(cx, |service, cx| {
+            service.configure_for_test(vault, config, provider.clone(), cx)
+        });
+        cx.run_until_parked();
+        // The buffer path waits out the typing guard before applying.
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+
+        let text = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert_eq!(
+            text,
+            "# Monday\n\n## Day planner\n\n- [ ] Workout\n\n### Calendar\n\n\
+             - [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->\n"
+        );
+        // The service edited the live buffer, not the file; autosave persists
+        // the change later, so the buffer is dirty and the disk untouched.
+        assert_eq!(fs.load(&note_path).await.unwrap(), original);
+        buffer.read_with(cx, |buffer, _| assert!(buffer.is_dirty()));
+        service.read_with(cx, |service, _| {
+            assert!(
+                matches!(service.state(), SyncState::Synced { .. }),
+                "unexpected state {:?}",
+                service.state()
+            );
+        });
     }
 }
