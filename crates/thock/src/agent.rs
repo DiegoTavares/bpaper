@@ -131,10 +131,7 @@ pub fn run_skill_kickoff(vault_relative_path: &str) -> String {
 /// any vault. Handled as a raw TOML table — never a typed schema — so fields
 /// written by newer builds survive both reads and saves by older ones.
 pub fn global_settings_path() -> PathBuf {
-    util::paths::home_dir()
-        .join(".config")
-        .join("thock")
-        .join("settings.toml")
+    paths::config_dir().join("settings.toml")
 }
 
 fn load_global_settings(path: &Path) -> Result<toml::Table> {

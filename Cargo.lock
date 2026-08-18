@@ -18764,6 +18764,7 @@ dependencies = [
  "markdown_preview",
  "menu",
  "multi_buffer",
+ "paths",
  "picker",
  "project",
  "schemars 1.0.4",
