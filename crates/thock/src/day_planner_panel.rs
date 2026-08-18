@@ -21,6 +21,9 @@ use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
+use crate::calendar_service::{
+    self, CalendarService, ConnectCalendar, SyncCalendarNow, SyncState,
+};
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
 use crate::notes::format_date;
 use crate::vault::VaultStatus;
@@ -68,6 +71,7 @@ pub struct DayPlannerPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
     vault_status: VaultStatus,
+    calendar_service: Option<Entity<CalendarService>>,
     active: Option<ActiveNote>,
     /// Panel-local UI state: the last clicked block/chip (spec §8).
     selected_item: Option<usize>,
@@ -123,17 +127,23 @@ impl DayPlannerPanel {
                     }
                 }
             });
+            let calendar_service = calendar_service::service_for_project(&project, cx);
+            let mut subscriptions = vec![project_subscription, workspace_subscription];
+            if let Some(service) = &calendar_service {
+                subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
                 focus_handle: cx.focus_handle(),
                 position: DockPosition::Right,
                 vault_status: VaultStatus::NotAVault,
+                calendar_service,
                 active: None,
                 selected_item: None,
                 reparse_task: None,
                 _now_tick: now_tick,
-                _subscriptions: vec![project_subscription, workspace_subscription],
+                _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
             // Resolving the active item reads the workspace entity, which is
@@ -325,6 +335,82 @@ impl DayPlannerPanel {
         cx.notify();
     }
 
+    /// The calendar-sync status row (spec v8 §10.3), shown only when the
+    /// vault has a Calendar config, so an unconnected vault looks exactly as
+    /// it does today (G6). The actions it triggers are also in the command
+    /// palette (`thock: connect calendar`, `thock: sync calendar now`).
+    fn render_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let service = self.calendar_service.as_ref()?.read(cx);
+        if !service.has_config() {
+            return None;
+        }
+        let muted = |text: String| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        };
+        let connect_button = |id: &'static str, label: &'static str| {
+            Button::new(id, label)
+                .label_size(LabelSize::Small)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(ConnectCalendar.boxed_clone(), cx);
+                })
+                .into_any_element()
+        };
+        let content = match service.state() {
+            SyncState::NoConfig => return None,
+            SyncState::NeverConnected => vec![connect_button("thock-connect-calendar", "Connect calendar")],
+            SyncState::Connecting => vec![muted("Calendar · connecting…".to_string())],
+            SyncState::Idle => vec![muted("Calendar · waiting for first sync".to_string())],
+            SyncState::Synced { at } => {
+                vec![muted(format!("Calendar · synced {}", format_ago(at.elapsed())))]
+            }
+            SyncState::Holding { reason } => vec![muted(format!("Calendar · {reason}"))],
+            SyncState::Failing { error } => vec![
+                muted("Calendar · sync failed".to_string()),
+                Button::new("thock-retry-calendar-sync", "Retry")
+                    .label_size(LabelSize::Small)
+                    .tooltip(ui::Tooltip::text(error.clone()))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(SyncCalendarNow.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+            ],
+            SyncState::Disconnected => vec![
+                muted("Calendar · sign-in expired".to_string()),
+                connect_button("thock-reconnect-calendar", "Reconnect"),
+            ],
+        };
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .justify_between()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .children(content)
+                .into_any_element(),
+        )
+    }
+
+    /// The theme colour for an item's subsection, from the `players()`
+    /// palette with index 0 skipped — that slot is the local-user colour and
+    /// stays associated with root-level items (spec v8 §11.3). `None` for
+    /// root-level items, which keep the accent treatment.
+    fn item_section_color(&self, item: &PlanItem, cx: &App) -> Option<gpui::Hsla> {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return None;
+        };
+        let section = item.section.as_deref()?;
+        let players = &cx.theme().players().0;
+        let palette = players.get(1..).filter(|palette| !palette.is_empty())?;
+        let slot =
+            day_plan::section_palette_slot(section, &vault.config.day_planner, palette.len());
+        palette.get(slot).map(|color| color.cursor)
+    }
+
     fn render_hint(&self, text: &'static str) -> Div {
         v_flex().p_3().child(
             Label::new(text)
@@ -392,6 +478,12 @@ impl DayPlannerPanel {
     fn render_chip(&self, item_index: usize, item: &PlanItem, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let selected = self.selected_item == Some(item_index);
+        // A chip carries the same border colour as its section's blocks so
+        // they read as one group (spec v8 §11.3).
+        let section_border = (!item.done)
+            .then(|| self.item_section_color(item, cx))
+            .flatten()
+            .map(|color| color.opacity(0.4));
         let label = Label::new(if item.label.is_empty() {
             "…".to_string()
         } else {
@@ -415,7 +507,7 @@ impl DayPlannerPanel {
             .border_color(if selected {
                 colors.text_accent
             } else {
-                colors.border_variant
+                section_border.unwrap_or(colors.border_variant)
             })
             .bg(colors.element_background)
             .cursor_pointer()
@@ -574,10 +666,14 @@ impl DayPlannerPanel {
             f32::from(height)
         };
         let label_lines = ((label_height / BLOCK_LABEL_LINE_PX).floor() as usize).max(1);
+        // Sectioned items take their subsection's hue with the exact alpha
+        // treatment root items get from the accent, so visual weight is
+        // unchanged; done stays muted regardless (spec v8 §11.3).
+        let base = self.item_section_color(item, cx).unwrap_or(accent);
         let (fill, border) = if item.done {
             (colors.text_muted.opacity(0.08), colors.border_variant)
         } else {
-            (accent.opacity(0.15), accent.opacity(0.4))
+            (base.opacity(0.15), base.opacity(0.4))
         };
         let caption = format!(
             "{} – {}",
@@ -612,7 +708,7 @@ impl DayPlannerPanel {
                     .overflow_hidden()
                     .bg(fill)
                     .border_1()
-                    .border_color(if selected { accent } else { border })
+                    .border_color(if selected { base } else { border })
                     .px_1()
                     .cursor_pointer()
                     .when(show_caption, |this| {
@@ -635,12 +731,22 @@ fn format_minutes(minutes: u32) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
+fn format_ago(elapsed: Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    match minutes {
+        0 => "just now".to_string(),
+        1..=59 => format!("{minutes}m ago"),
+        _ => format!("{}h ago", minutes / 60),
+    }
+}
+
 impl Render for DayPlannerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("ThockDayPlannerPanel")
             .track_focus(&self.focus_handle)
             .size_full()
+            .children(self.render_status_row(cx))
             .child(self.render_planner(cx))
     }
 }

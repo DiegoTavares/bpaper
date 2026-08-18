@@ -2,6 +2,9 @@ pub mod agent;
 pub mod agent_panel;
 pub mod backlog;
 pub mod backlog_panel;
+pub mod calendar;
+pub mod calendar_google;
+pub mod calendar_service;
 pub mod day_plan;
 pub mod day_planner_panel;
 pub mod history;
@@ -30,6 +33,7 @@ pub fn init(cx: &mut App) {
     day_planner_panel::init(cx);
     agent_panel::init(cx);
     backlog_panel::init(cx);
+    calendar_service::init(cx);
 }
 
 /// Opens `path` and lands the user on a rendered markdown preview of it

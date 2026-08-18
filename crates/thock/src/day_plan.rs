@@ -19,6 +19,10 @@ pub struct DayPlannerConfig {
     /// Duration, in minutes, for tasks written with only a start time.
     pub default_duration: u32,
     pub show_now_indicator: bool,
+    /// `[day_planner.sections]` palette-index pins, keyed by the trimmed,
+    /// lowercased section name (spec v8 §7.3). Sections not listed here get
+    /// the hashed index.
+    pub sections: std::collections::HashMap<String, usize>,
 }
 
 impl Default for DayPlannerConfig {
@@ -29,6 +33,7 @@ impl Default for DayPlannerConfig {
             day_end: 24 * 60,
             default_duration: 30,
             show_now_indicator: true,
+            sections: std::collections::HashMap::new(),
         }
     }
 }
@@ -49,9 +54,13 @@ pub struct PlanItem {
     /// 0-based buffer row of the checkbox line, for reveal-on-click.
     pub row: u32,
     pub done: bool,
-    /// Task text with any leading time token removed.
+    /// Task text with any leading time token and trailing HTML comment removed.
     pub label: String,
     pub timing: ItemTiming,
+    /// The subsection heading (exactly one level deeper than the planner
+    /// heading) the item sits under; `None` for root-level items and when the
+    /// whole note is parsed without a planner heading (spec v8 §11.1).
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -60,6 +69,19 @@ pub struct DayPlan {
 }
 
 impl DayPlan {
+    /// The subsection names present in the plan, in first-appearance order.
+    pub fn sections(&self) -> Vec<&str> {
+        let mut sections: Vec<&str> = Vec::new();
+        for item in &self.items {
+            if let Some(section) = item.section.as_deref()
+                && !sections.contains(&section)
+            {
+                sections.push(section);
+            }
+        }
+        sections
+    }
+
     pub fn unscheduled_indices(&self) -> impl Iterator<Item = usize> + '_ {
         self.items
             .iter()
@@ -81,12 +103,25 @@ impl DayPlan {
 /// it just becomes unscheduled with its raw text as the label.
 pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
     let lines: Vec<&str> = text.lines().collect();
-    let range = planner_section(&lines, &config.heading).unwrap_or(0..lines.len());
+    let (range, planner_level) = match planner_section(&lines, &config.heading) {
+        Some((range, level)) => (range, Some(level)),
+        None => (0..lines.len(), None),
+    };
     let mut items = Vec::new();
+    let mut current_section: Option<String> = None;
     for row in range {
         let Some(line) = lines.get(row) else {
             continue;
         };
+        if let Some(planner_level) = planner_level
+            && let Some((level, heading_text)) = heading_level_and_text(line)
+            // Only headings exactly one level deeper start a subsection;
+            // deeper ones belong to the current subsection (spec v8 §11.1).
+            && level == planner_level + 1
+        {
+            current_section = Some(heading_text.to_string());
+            continue;
+        }
         let Some((done, task_text)) = parse_task_line(line) else {
             continue;
         };
@@ -97,17 +132,68 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
         items.push(PlanItem {
             row: row as u32,
             done,
-            label: label.trim().to_string(),
+            label: strip_trailing_comment(label.trim()).to_string(),
             timing,
+            section: current_section.clone(),
         });
     }
     DayPlan { items }
 }
 
+/// Removes one trailing HTML comment (`<!-- … -->` at end of line) from a
+/// label, plus the whitespace before it. Generic rather than gcal-specific,
+/// so a user's own trailing comment is hidden the same way (spec v8 §11.4).
+pub fn strip_trailing_comment(label: &str) -> &str {
+    let trimmed = label.trim_end();
+    if !trimmed.ends_with("-->") {
+        return label;
+    }
+    match trimmed.rfind("<!--") {
+        Some(start) if start + 4 <= trimmed.len() - 3 => trimmed[..start].trim_end(),
+        _ => label,
+    }
+}
+
+/// A stable palette slot for a subsection name: FNV-1a over the trimmed,
+/// lowercased name, so a section keeps its colour across re-parse, restart,
+/// and days (spec v8 §11.2).
+pub fn section_palette_index(name: &str, palette_len: usize) -> usize {
+    if palette_len == 0 {
+        return 0;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.trim().to_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    (hash % palette_len as u64) as usize
+}
+
+/// The palette slot for a section, honouring a `[day_planner.sections]` pin
+/// when it is in range; an out-of-range pin is a logged warning and falls
+/// back to the hashed index (spec v8 §11.3).
+pub fn section_palette_slot(name: &str, config: &DayPlannerConfig, palette_len: usize) -> usize {
+    let key = name.trim().to_lowercase();
+    if let Some(&pinned) = config.sections.get(&key) {
+        if pinned < palette_len {
+            return pinned;
+        }
+        log::warn!(
+            "Thock: [day_planner.sections] pins {name:?} to colour {pinned}, but the \
+             theme only has {palette_len}; using the hashed colour"
+        );
+    }
+    section_palette_index(name, palette_len)
+}
+
 /// The line range under the first heading matching `heading`
 /// (case-insensitively), ending before the next heading of equal or higher
-/// level. `None` when the heading is unset or not found.
-fn planner_section(lines: &[&str], heading: &str) -> Option<std::ops::Range<usize>> {
+/// level, plus the matched heading's level. `None` when the heading is unset
+/// or not found.
+pub(crate) fn planner_section(
+    lines: &[&str],
+    heading: &str,
+) -> Option<(std::ops::Range<usize>, usize)> {
     let wanted = heading.trim();
     if wanted.is_empty() {
         return None;
@@ -122,7 +208,7 @@ fn planner_section(lines: &[&str], heading: &str) -> Option<std::ops::Range<usiz
         .position(|line| heading_level_and_text(line).is_some_and(|(l, _)| l <= level))
         .map(|offset| start + 1 + offset)
         .unwrap_or(lines.len());
-    Some(start + 1..end)
+    Some((start + 1..end, level))
 }
 
 pub(crate) fn heading_level_and_text(line: &str) -> Option<(usize, &str)> {
@@ -185,7 +271,7 @@ fn parse_leading_time(text: &str, default_duration: u32) -> Option<(u32, u32, &s
 
 /// `H:MM` / `HH:MM`, 24-hour, at the very start of `text`. Returns the
 /// minutes since midnight and the remaining text.
-fn parse_time_prefix(text: &str) -> Option<(u32, &str)> {
+pub(crate) fn parse_time_prefix(text: &str) -> Option<(u32, &str)> {
     let bytes = text.as_bytes();
     let mut hour_digits = 0;
     while hour_digits < 2
@@ -213,7 +299,7 @@ fn parse_time_prefix(text: &str) -> Option<(u32, &str)> {
 
 /// A range separator (`–`, `—`, `-`, or `to`, optional surrounding spaces)
 /// followed by a valid time. `None` leaves the caller on the start-only path.
-fn parse_range_end(text: &str) -> Option<(u32, &str)> {
+pub(crate) fn parse_range_end(text: &str) -> Option<(u32, &str)> {
     let trimmed = text.trim_start();
     let after_separator = trimmed
         .strip_prefix('–')
@@ -376,18 +462,21 @@ mod tests {
                     done: false,
                     label: "Evaluate the plan".to_string(),
                     timing: timed(480, 660),
+                    section: None,
                 },
                 PlanItem {
                     row: 1,
                     done: false,
                     label: "Standup".to_string(),
                     timing: timed(570, 600),
+                    section: None,
                 },
                 PlanItem {
                     row: 2,
                     done: false,
                     label: "Workout".to_string(),
                     timing: ItemTiming::Unscheduled,
+                    section: None,
                 },
             ]
         );
@@ -585,6 +674,78 @@ mod tests {
         config.heading = String::new();
         let plan = parse_day_plan("## Day planner\n- [ ] One\n## Next\n- [ ] Two\n", &config);
         assert_eq!(plan.items.len(), 2);
+    }
+
+    #[test]
+    fn sections_are_tracked_one_level_below_the_planner_heading() {
+        let plan = parse_day_plan(
+            "## Day planner\n\
+             - [ ] Root item\n\
+             ### Calendar\n\
+             - [ ] 10:00 - 10:30 Meeting\n\
+             #### Deeper\n\
+             - [ ] Still calendar\n\
+             ### Misc\n\
+             - [ ] Errand\n\
+             ## Personal\n\
+             - [ ] Outside\n",
+            &config(),
+        );
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| (item.label.as_str(), item.section.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Root item", None),
+                ("Meeting", Some("Calendar")),
+                ("Still calendar", Some("Calendar")),
+                ("Errand", Some("Misc")),
+            ]
+        );
+        assert_eq!(plan.sections(), vec!["Calendar", "Misc"]);
+    }
+
+    #[test]
+    fn whole_file_parse_has_no_sections() {
+        let mut config = config();
+        config.heading = String::new();
+        let plan = parse_day_plan("## Calendar\n- [ ] 09:00 T\n", &config);
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].section, None);
+        assert!(plan.sections().is_empty());
+    }
+
+    #[test]
+    fn trailing_html_comment_is_stripped_from_labels() {
+        let plan = parse_day_plan(
+            "- [x] 10:00 - 10:30 API Leads meeting <!--gcal:9f2c1ab4e7d0-->\n\
+             - [ ] Own note <!-- remember this -->\n\
+             - [ ] Not a comment --> here\n\
+             - [ ] <!--only comment-->\n",
+            &config(),
+        );
+        assert_eq!(plan.items[0].label, "API Leads meeting");
+        assert_eq!(plan.items[1].label, "Own note");
+        assert_eq!(plan.items[2].label, "Not a comment --> here");
+        assert_eq!(plan.items[3].label, "");
+    }
+
+    #[test]
+    fn strip_trailing_comment_ignores_mid_line_comments() {
+        assert_eq!(strip_trailing_comment("a <!-- b --> c"), "a <!-- b --> c");
+        assert_eq!(strip_trailing_comment("a <!-- b -->"), "a");
+        assert_eq!(strip_trailing_comment("<!-->"), "<!-->");
+        assert_eq!(strip_trailing_comment("plain"), "plain");
+    }
+
+    #[test]
+    fn section_palette_index_is_stable_and_case_insensitive() {
+        let index = section_palette_index("Meetings", 8);
+        assert_eq!(section_palette_index("Meetings", 8), index);
+        assert_eq!(section_palette_index("  meetings ", 8), index);
+        assert!(index < 8);
+        assert_eq!(section_palette_index("anything", 0), 0);
     }
 
     #[test]
