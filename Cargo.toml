@@ -22,7 +22,6 @@ members = [
     "crates/bedrock",
     "crates/benchmarks",
     "crates/breadcrumbs",
-    "crates/breadpaper",
     "crates/buffer_diff",
     "crates/call",
     "crates/channel",
@@ -212,6 +211,7 @@ members = [
     "crates/theme_settings",
     "crates/theme_importer",
     "crates/theme_selector",
+    "crates/thock",
     "crates/time_format",
     "crates/title_bar",
     "crates/toolchain_selector",
@@ -290,7 +290,6 @@ auto_update_ui = { path = "crates/auto_update_ui" }
 aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
-breadpaper = { path = "crates/breadpaper" }
 buffer_diff = { path = "crates/buffer_diff" }
 call = { path = "crates/call" }
 channel = { path = "crates/channel" }
@@ -474,6 +473,7 @@ theme = { path = "crates/theme" }
 theme_extension = { path = "crates/theme_extension" }
 theme_settings = { path = "crates/theme_settings" }
 theme_selector = { path = "crates/theme_selector" }
+thock = { path = "crates/thock" }
 time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 title_bar = { path = "crates/title_bar" }

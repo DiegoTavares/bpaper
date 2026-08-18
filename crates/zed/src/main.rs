@@ -738,8 +738,8 @@ fn main() {
         tab_switcher::init(cx);
         outline::init(cx);
         project_symbols::init(cx);
-        breadpaper::init(cx);
-        breadpaper::history::init(cx);
+        thock::init(cx);
+        thock::history::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
         tasks_ui::init(cx);
@@ -1529,9 +1529,9 @@ pub(crate) async fn restore_or_create_workspace(
             .await?;
         }
     } else {
-        // BreadPaper: with nothing to restore, open the default vault (scaffolding
+        // Thock: with nothing to restore, open the default vault (scaffolding
         // it on first run) instead of Zed's onboarding view or an empty workspace.
-        cx.update(|cx| breadpaper::open_startup_vault(app_state, cx))
+        cx.update(|cx| thock::open_startup_vault(app_state, cx))
             .await?;
     }
 

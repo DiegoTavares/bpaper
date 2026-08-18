@@ -5325,7 +5325,7 @@ mod tests {
         let vault_dir = temp_dir.path().join("vault");
         fs::create_dir_all(vault_dir.join("daily")).unwrap();
         fs::write(vault_dir.join("daily/note.md"), "hello").unwrap();
-        let git_dir = vault_dir.join(".breadpaper").join("history");
+        let git_dir = vault_dir.join(".thock").join("history");
 
         RealGitRepository::init_separate_git_dir(
             &git_dir,
@@ -5340,7 +5340,7 @@ mod tests {
         // in the work tree.
         assert!(!vault_dir.join(".git").exists());
         fs::create_dir_all(git_dir.join("info")).unwrap();
-        fs::write(git_dir.join("info/exclude"), "/.breadpaper/history/\n").unwrap();
+        fs::write(git_dir.join("info/exclude"), "/.thock/history/\n").unwrap();
 
         let repo = RealGitRepository::new_with_separate_git_dir(
             git_dir.clone(),
@@ -5354,8 +5354,8 @@ mod tests {
             repo.checkpoint_onto_ref(
                 "refs/heads/checkpoints".to_string(),
                 message.to_string(),
-                "BreadPaper".to_string(),
-                "history@breadpaper.local".to_string(),
+                "Thock".to_string(),
+                "history@thock.local".to_string(),
                 1024 * 1024,
             )
         };
@@ -5388,7 +5388,7 @@ mod tests {
                 &vault_dir,
                 [git_dir_arg.as_str(), "log", "-1", "--format=%s %an"]
             ),
-            "checkpoint: idle BreadPaper"
+            "checkpoint: idle Thock"
         );
 
         // A file at or above `max_file_bytes` stays out of the snapshot; the
@@ -5437,7 +5437,7 @@ mod tests {
         git_command(&vault_dir, ["add", "."]);
         git_command(&vault_dir, ["commit", "-m", "user commit"]);
 
-        let git_dir = vault_dir.join(".breadpaper").join("history");
+        let git_dir = vault_dir.join(".thock").join("history");
         RealGitRepository::init_separate_git_dir(
             &git_dir,
             &vault_dir,
@@ -5448,7 +5448,7 @@ mod tests {
         .await
         .unwrap();
         fs::create_dir_all(git_dir.join("info")).unwrap();
-        fs::write(git_dir.join("info/exclude"), "/.breadpaper/history/\n").unwrap();
+        fs::write(git_dir.join("info/exclude"), "/.thock/history/\n").unwrap();
         let repo = RealGitRepository::new_with_separate_git_dir(
             git_dir.clone(),
             vault_dir.clone(),
@@ -5464,8 +5464,8 @@ mod tests {
         repo.checkpoint_onto_ref(
             "refs/heads/checkpoints".to_string(),
             "checkpoint: idle".to_string(),
-            "BreadPaper".to_string(),
-            "history@breadpaper.local".to_string(),
+            "Thock".to_string(),
+            "history@thock.local".to_string(),
             1024 * 1024,
         )
         .await

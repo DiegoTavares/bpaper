@@ -772,14 +772,14 @@ fn show_software_emulation_warning_if_needed(
 
 fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<anyhow::Result<()>> {
     cx.spawn_in(window, async move |workspace_handle, cx| {
-        let breadpaper_routines_panel =
-            breadpaper::RoutinesPanel::load(workspace_handle.clone(), cx.clone());
-        let breadpaper_day_planner_panel =
-            breadpaper::DayPlannerPanel::load(workspace_handle.clone(), cx.clone());
-        let breadpaper_agent_panel =
-            breadpaper::AgentPanel::load(workspace_handle.clone(), cx.clone());
-        let breadpaper_backlog_panel =
-            breadpaper::BacklogPanel::load(workspace_handle.clone(), cx.clone());
+        let thock_routines_panel =
+            thock::RoutinesPanel::load(workspace_handle.clone(), cx.clone());
+        let thock_day_planner_panel =
+            thock::DayPlannerPanel::load(workspace_handle.clone(), cx.clone());
+        let thock_agent_panel =
+            thock::AgentPanel::load(workspace_handle.clone(), cx.clone());
+        let thock_backlog_panel =
+            thock::BacklogPanel::load(workspace_handle.clone(), cx.clone());
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
@@ -804,15 +804,15 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         }
 
         futures::join!(
-            add_panel_when_ready(breadpaper_routines_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(thock_routines_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(
-                breadpaper_day_planner_panel,
+                thock_day_planner_panel,
                 workspace_handle.clone(),
                 cx.clone()
             ),
-            add_panel_when_ready(breadpaper_agent_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(thock_agent_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(
-                breadpaper_backlog_panel,
+                thock_backlog_panel,
                 workspace_handle.clone(),
                 cx.clone()
             ),
@@ -825,10 +825,10 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 
-        // BreadPaper: default the left dock to the timeline panel in vaults.
+        // Thock: default the left dock to the timeline panel in vaults.
         workspace_handle
             .update_in(cx, |workspace, window, cx| {
-                breadpaper::show_panel_if_vault(workspace, window, cx);
+                thock::show_panel_if_vault(workspace, window, cx);
             })
             .log_err();
 

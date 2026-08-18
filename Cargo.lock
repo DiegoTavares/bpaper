@@ -2455,40 +2455,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "breadpaper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "editor",
- "fs",
- "fuzzy",
- "git",
- "gpui",
- "language",
- "log",
- "markdown_preview",
- "menu",
- "multi_buffer",
- "picker",
- "project",
- "schemars 1.0.4",
- "serde",
- "sha2",
- "shlex",
- "task",
- "tempfile",
- "terminal",
- "terminal_view",
- "text",
- "toml 0.8.23",
- "ui",
- "util",
- "which 6.0.3",
- "workspace",
-]
-
-[[package]]
 name = "brush-parser"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18783,6 +18749,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "thock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "editor",
+ "fs",
+ "fuzzy",
+ "git",
+ "gpui",
+ "language",
+ "log",
+ "markdown_preview",
+ "menu",
+ "multi_buffer",
+ "picker",
+ "project",
+ "schemars 1.0.4",
+ "serde",
+ "sha2",
+ "shlex",
+ "task",
+ "tempfile",
+ "terminal",
+ "terminal_view",
+ "text",
+ "toml 0.8.23",
+ "ui",
+ "util",
+ "which 6.0.3",
+ "workspace",
+]
+
+[[package]]
 name = "thread_local"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23212,7 +23212,6 @@ dependencies = [
  "auto_update",
  "auto_update_ui",
  "breadcrumbs",
- "breadpaper",
  "call",
  "channel",
  "chrono",
@@ -23338,6 +23337,7 @@ dependencies = [
  "theme_extension",
  "theme_selector",
  "theme_settings",
+ "thock",
  "time",
  "time_format",
  "title_bar",
