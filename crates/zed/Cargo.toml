@@ -6,7 +6,7 @@ version = "1.14.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+default-run = "thock"
 
 [lints]
 workspace = true
@@ -54,7 +54,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zed"
+name = "thock"
 path = "src/main.rs"
 
 [[bin]]
@@ -77,7 +77,6 @@ audio.workspace = true
 auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
-breadpaper.workspace = true
 call.workspace = true
 chrono.workspace = true
 channel.workspace = true
@@ -205,6 +204,7 @@ theme.workspace = true
 theme_settings.workspace = true
 theme_extension.workspace = true
 theme_selector.workspace = true
+thock.workspace = true
 time.workspace = true
 time_format.workspace = true
 title_bar.workspace = true

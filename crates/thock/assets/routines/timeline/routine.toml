@@ -1,0 +1,95 @@
+schema  = 2
+id      = "timeline"
+name    = "Daily & Weekly"
+version = 3
+summary = "Daily & weekly rhythm — weekly review and a progress dashboard."
+icon    = "clock"
+doc     = "routines/timeline/Timeline.md"
+
+# Quick links — the Routine's navigation rows, in order. `open` supports the
+# date templates {today} {yesterday} {tomorrow} {this_week} {last_week},
+# resolved from the vault's [daily]/[weekly] config.
+[[link]]
+id     = "today"
+name   = "Today"
+open   = "daily/{today}.md"
+kind   = "editor"
+create = true
+
+[[link]]
+id     = "yesterday"
+name   = "Yesterday"
+open   = "daily/{yesterday}.md"
+kind   = "editor"
+create = true
+
+[[link]]
+id     = "this-week"
+name   = "This Week"
+open   = "weekly/{this_week}.md"
+kind   = "editor"
+create = true
+
+[[link]]
+id     = "last-week"
+name   = "Last Week"
+open   = "weekly/{last_week}.md"
+kind   = "editor"
+create = true
+
+[[link]]
+id   = "weekly-dashboard"
+name = "Weekly Dashboard"
+open = "weekly/site/index.html"
+kind = "browser"
+
+# Folders/files created in the vault on install. create-if-missing; never clobber.
+[[scaffold]]
+kind = "dir"
+path = "weekly/site"
+
+[[scaffold]]
+kind   = "file"
+path   = "weekly/site/index.html"
+source = "assets/index.html"
+
+[[scaffold]]
+kind   = "file"
+path   = "weekly/site/data.js"
+source = "assets/data.seed.js"
+
+[[skill]]
+id      = "week-review"
+name    = "Week Review"
+file    = "routines/timeline/skills/week-review.md"
+summary = "Aggregate the week's notes + PRs/MRs, append a review, feed the dashboard."
+reads   = ["daily/**", "weekly/**", "backlog.md", "mcp:github", "mcp:gitlab"]
+writes  = ["weekly/<week>.md (append)", "weekly/site/data.js (append)", "backlog.md (append)"]
+
+[[skill]]
+id      = "wrap-today"
+name    = "Wrap Today"
+file    = "routines/timeline/skills/wrap-today.md"
+summary = "Close out today's note — tasks + commits + recent context, append a daily closure."
+reads   = ["daily/**", "backlog.md", "git:log", "mcp:github", "mcp:gitlab"]
+writes  = ["daily/<today>.md (append)", "backlog.md (append)"]
+
+[[skill]]
+id      = "wrap-yesterday"
+name    = "Wrap Yesterday"
+file    = "routines/timeline/skills/wrap-yesterday.md"
+summary = "Close out yesterday's note — tasks + commits + surrounding context, append a daily closure."
+reads   = ["daily/**", "backlog.md", "git:log", "mcp:github", "mcp:gitlab"]
+writes  = ["daily/<yesterday>.md (append)", "backlog.md (append)"]
+
+[[skill]]
+id      = "onboarding"
+name    = "Set Up Timeline"
+file    = "routines/timeline/skills/onboarding.md"
+summary = "Guided setup — migrate your existing daily notes into this vault (copies, never moves)."
+reads   = ["daily/**", "weekly/**", ".thock/config.toml", "your existing notes (read-only)"]
+writes  = ["daily/**", "weekly/**", ".thock/state/onboarded/timeline"]
+
+# The skill Thock auto-launches when this Routine is added (V5).
+[onboarding]
+skill = "routines/timeline/skills/onboarding.md"
