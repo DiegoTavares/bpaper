@@ -111,6 +111,8 @@ struct VaultConfigContent {
     agent: AgentConfigContent,
     #[serde(skip_serializing_if = "BacklogConfigContent::is_unset")]
     backlog: BacklogConfigContent,
+    #[serde(skip_serializing_if = "MarkdownConfigContent::is_unset")]
+    markdown: MarkdownConfigContent,
 }
 
 impl VaultConfigContent {
@@ -187,6 +189,38 @@ impl AgentConfigContent {
 
     fn is_unset(&self) -> bool {
         self.command.is_none()
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct MarkdownConfigContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conceal: Option<bool>,
+}
+
+impl MarkdownConfigContent {
+    fn resolve(self) -> MarkdownConfig {
+        MarkdownConfig {
+            conceal: self.conceal.unwrap_or(true),
+        }
+    }
+
+    fn is_unset(&self) -> bool {
+        self.conceal.is_none()
+    }
+}
+
+/// The `[markdown]` table: whether Markdown markup in vault notes is hidden
+/// while the cursor is off the line (spec V10 §9). Defaults to concealed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkdownConfig {
+    pub conceal: bool,
+}
+
+impl Default for MarkdownConfig {
+    fn default() -> Self {
+        Self { conceal: true }
     }
 }
 
@@ -487,6 +521,7 @@ pub struct VaultConfig {
     pub day_planner: DayPlannerConfig,
     pub agent: AgentConfig,
     pub backlog: BacklogConfig,
+    pub markdown: MarkdownConfig,
 }
 
 impl Default for VaultConfig {
@@ -507,6 +542,7 @@ impl VaultConfigContent {
             day_planner: self.day_planner.resolve(),
             agent: self.agent.resolve(),
             backlog: self.backlog.resolve(),
+            markdown: self.markdown.resolve(),
         }
     }
 }
@@ -940,6 +976,24 @@ mod tests {
             }
             other => panic!("expected valid vault, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn markdown_config_parses_and_defaults_to_concealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[markdown]\nconceal = false\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert!(!vault.config.markdown.conceal),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+        // An absent section means the default: concealed.
+        assert!(VaultConfig::default().markdown.conceal);
     }
 
     #[test]

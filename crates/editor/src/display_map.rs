@@ -186,6 +186,7 @@ pub enum HighlightKey {
     SearchWithinRange,
     SelectedTextHighlight,
     SyntaxTreeView(usize),
+    ThockMarkdownConceal(usize),
     VimExchange,
 }
 
