@@ -29,7 +29,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 4
+version = 6
 "#;
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(vault.config.history, VaultConfig::default().history);
         assert_eq!(
             vault.config.routines.installed,
-            vec![InstalledRoutine::new("timeline".to_string(), true, 4)]
+            vec![InstalledRoutine::new("timeline".to_string(), true, 6)]
         );
         assert!(dir.path().join("daily").is_dir());
         assert!(dir.path().join("weekly").is_dir());

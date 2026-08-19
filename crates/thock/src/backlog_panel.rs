@@ -10,9 +10,9 @@ use anyhow::{Context as _, Result};
 use chrono::Local;
 use editor::{Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, App, AsyncWindowContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, HighlightStyle, Hsla, InteractiveText, KeyContext, Pixels, StyledText, Subscription,
-    Task, UnderlineStyle, WeakEntity, Window, actions, div, px,
+    Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, HighlightStyle, Hsla, InteractiveText, KeyContext, Pixels, StyledText,
+    Subscription, Task, UnderlineStyle, WeakEntity, Window, actions, div, px,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -28,6 +28,8 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{OpenOptions, OpenVisible, Workspace};
 
 use crate::backlog::{self, Backlog, BacklogTask, SectionKind, parse_backlog, split_completion};
+use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
+use crate::gmail_service::{self, GmailService, SyncGmailNow};
 use crate::markdown_text::{InlineSpan, parse_inline_links};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::vault::{Vault, VaultStatus};
@@ -129,6 +131,9 @@ pub struct BacklogPanel {
     mark_in_flight: bool,
     load_buffer_task: Option<Task<()>>,
     reparse_task: Option<Task<()>>,
+    /// The email-capture service, for the status row (spec v9 §10.3). The
+    /// service lives independently of the panel; this is display only.
+    gmail_service: Option<Entity<GmailService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -160,6 +165,11 @@ impl BacklogPanel {
                     this.refresh_vault_status(cx);
                 }
             });
+            let gmail_service = gmail_service::service_for_project(&project, cx);
+            let mut subscriptions = vec![project_subscription];
+            if let Some(service) = &gmail_service {
+                subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
@@ -177,7 +187,8 @@ impl BacklogPanel {
                 mark_in_flight: false,
                 load_buffer_task: None,
                 reparse_task: None,
-                _subscriptions: vec![project_subscription],
+                gmail_service,
+                _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
             this.ensure_buffer(cx);
@@ -1414,6 +1425,69 @@ impl BacklogPanel {
             .into_any_element()
     }
 
+    /// The email-capture status row (spec v9 §10.3), shown only when the
+    /// vault has a Gmail config, so a vault without one looks exactly as it
+    /// does today (G5). The actions it triggers are also in the command
+    /// palette (`thock: connect google workspace`, `thock: sync gmail now`).
+    fn render_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let service = self.gmail_service.as_ref()?.read(cx);
+        if !service.has_config() {
+            return None;
+        }
+        let muted = |text: String| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        };
+        let connect_button = |id: &'static str, label: &'static str| {
+            Button::new(id, label)
+                .label_size(LabelSize::Small)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(ConnectGoogleWorkspace.boxed_clone(), cx);
+                })
+                .into_any_element()
+        };
+        let content = match service.state() {
+            SyncState::NoConfig => return None,
+            SyncState::NeverConnected => vec![connect_button(
+                "thock-connect-google-workspace-backlog",
+                "Connect Google Workspace",
+            )],
+            SyncState::Connecting => vec![muted("Gmail · connecting…".to_string())],
+            SyncState::Idle => vec![muted("Gmail · waiting for first check".to_string())],
+            SyncState::Synced { at } => {
+                vec![muted(format!("Gmail · checked {}", format_ago(at.elapsed())))]
+            }
+            SyncState::Holding { reason } => vec![muted(format!("Gmail · {reason}"))],
+            SyncState::Failing { error } => vec![
+                muted("Gmail · sync failed".to_string()),
+                Button::new("thock-retry-gmail-sync", "Retry")
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(error.clone()))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(SyncGmailNow.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+            ],
+            SyncState::Disconnected => vec![
+                muted("Gmail · sign-in needed".to_string()),
+                connect_button("thock-reconnect-google-workspace", "Reconnect"),
+            ],
+        };
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .justify_between()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .children(content)
+                .into_any_element(),
+        )
+    }
+
     fn render_body(&self, cx: &Context<Self>) -> AnyElement {
         match &self.vault_status {
             VaultStatus::NotAVault => self
@@ -1457,6 +1531,15 @@ impl BacklogPanel {
     }
 }
 
+fn format_ago(elapsed: Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    match minutes {
+        0 => "just now".to_string(),
+        1..=59 => format!("{minutes}m ago"),
+        _ => format!("{}h ago", minutes / 60),
+    }
+}
+
 impl Render for BacklogPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::new_with_defaults();
@@ -1488,6 +1571,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::copy_selected_task))
             .on_action(cx.listener(Self::reveal_selected_task))
             .size_full()
+            .children(self.render_status_row(cx))
             .child(self.render_body(cx))
     }
 }
