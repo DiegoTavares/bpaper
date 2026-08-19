@@ -25,7 +25,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::calendar_service::{
-    self, CalendarService, ConnectCalendar, SyncCalendarNow, SyncState,
+    self, CalendarService, ConnectGoogleWorkspace, SyncCalendarNow, SyncState,
 };
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
 use crate::notes::{NoteKind, format_date};
@@ -494,7 +494,8 @@ impl DayPlannerPanel {
     /// The calendar-sync status row (spec v8 §10.3), shown only when the
     /// vault has a Calendar config, so an unconnected vault looks exactly as
     /// it does today (G6). The actions it triggers are also in the command
-    /// palette (`thock: connect calendar`, `thock: sync calendar now`).
+    /// palette (`thock: connect google workspace`, `thock: sync calendar
+    /// now`).
     fn render_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let service = self.calendar_service.as_ref()?.read(cx);
         if !service.has_config() {
@@ -510,13 +511,16 @@ impl DayPlannerPanel {
             Button::new(id, label)
                 .label_size(LabelSize::Small)
                 .on_click(|_, window, cx| {
-                    window.dispatch_action(ConnectCalendar.boxed_clone(), cx);
+                    window.dispatch_action(ConnectGoogleWorkspace.boxed_clone(), cx);
                 })
                 .into_any_element()
         };
         let content = match service.state() {
             SyncState::NoConfig => return None,
-            SyncState::NeverConnected => vec![connect_button("thock-connect-calendar", "Connect calendar")],
+            SyncState::NeverConnected => vec![connect_button(
+                "thock-connect-google-workspace",
+                "Connect Google Workspace",
+            )],
             SyncState::Connecting => vec![muted("Calendar · connecting…".to_string())],
             SyncState::Idle => vec![muted("Calendar · waiting for first sync".to_string())],
             SyncState::Synced { at } => {

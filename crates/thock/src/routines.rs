@@ -43,8 +43,8 @@ const TIMELINE_WRAP_YESTERDAY_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/wrap-yesterday.md");
 const TIMELINE_ONBOARDING_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/onboarding.md");
-const TIMELINE_CONNECT_CALENDAR_SKILL: &str =
-    include_str!("../assets/routines/timeline/skills/connect-calendar.md");
+const TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL: &str =
+    include_str!("../assets/routines/timeline/skills/connect-google-workspace.md");
 const TIMELINE_DASHBOARD_HTML: &str = include_str!("../assets/routines/timeline/assets/index.html");
 const TIMELINE_DASHBOARD_SEED: &str =
     include_str!("../assets/routines/timeline/assets/data.seed.js");
@@ -643,7 +643,10 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
             ("skills/wrap-today.md", TIMELINE_WRAP_TODAY_SKILL),
             ("skills/wrap-yesterday.md", TIMELINE_WRAP_YESTERDAY_SKILL),
             ("skills/onboarding.md", TIMELINE_ONBOARDING_SKILL),
-            ("skills/connect-calendar.md", TIMELINE_CONNECT_CALENDAR_SKILL),
+            (
+                "skills/connect-google-workspace.md",
+                TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL,
+            ),
             ("assets/index.html", TIMELINE_DASHBOARD_HTML),
             ("assets/data.seed.js", TIMELINE_DASHBOARD_SEED),
         ],
@@ -1754,7 +1757,7 @@ mod tests {
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
-        assert_eq!(manifest.version, 4);
+        assert_eq!(manifest.version, 6);
         assert_eq!(manifest.icon.as_deref(), Some("clock"));
         assert_eq!(manifest.doc, "routines/timeline/Timeline.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
@@ -2529,7 +2532,7 @@ open = "weekly/site/index.html"
         assert!(raw.contains("[[routines.installed]]"), "{raw}");
         assert!(!raw.contains("[[areas.installed]]"), "{raw}");
         let vault = detect(root);
-        assert_eq!(vault.config.routines.installed[0].version, 4);
+        assert_eq!(vault.config.routines.installed[0].version, 6);
 
         // Idempotent: a second pass changes nothing.
         let vault = detect(root);

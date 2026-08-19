@@ -1,103 +1,27 @@
 //! The Google Calendar REST provider (spec `v8-calendar-sync.md` §6, §10.2):
-//! OAuth 2.0 loopback + PKCE, refresh-token storage in the system keychain,
 //! `calendarList.list` / `events.list` with conditional requests, and the
-//! response → `CalendarEvent` normalization. Read-only toward Google.
+//! response → `CalendarEvent` normalization. Read-only toward Google. The
+//! OAuth machinery lives in `google_auth.rs` since V9 unified it with Gmail.
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use base64::Engine as _;
 use chrono::{DateTime, Local, NaiveDate, Timelike as _};
 use futures::AsyncReadExt as _;
 use gpui::{AsyncApp, Task};
 use http_client::{AsyncBody, HttpClient, Request, http};
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::calendar::{
-    CalendarEvent, CalendarProvider, EventFilters, Fetched, GoogleClientOverride, event_marker_id,
+    CalendarEvent, CalendarProvider, EventFilters, Fetched, event_marker_id,
+};
+use crate::google_auth::{
+    AuthRevoked, GoogleClient, Unauthorized, read_refresh_token_allowing_legacy,
+    refresh_access_token, token_lifetime,
 };
 
-/// Keychain slot for the refresh token (spec §6.2): username is the account
-/// email, password is the token. No token ever touches the vault.
-pub const KEYCHAIN_URL: &str = "https://thock.local/calendar/google";
-
-pub const SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
-const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const API_BASE: &str = "https://www.googleapis.com/calendar/v3";
-
-/// The bundled Google *Desktop app* OAuth client, baked in at build time.
-/// Google's own guidance is that a desktop client secret is not confidential,
-/// which is why PKCE is mandatory here rather than optional. `[google]` in
-/// `.thock/calendar.toml` overrides the pair (spec §6.2).
-const BUNDLED_CLIENT_ID: Option<&str> = option_env!("THOCK_GOOGLE_CLIENT_ID");
-const BUNDLED_CLIENT_SECRET: Option<&str> = option_env!("THOCK_GOOGLE_CLIENT_SECRET");
-
-/// The user's grant is gone (`invalid_grant`, or a 401 that survives a token
-/// refresh): the service must move to `Disconnected` instead of retrying
-/// (spec §6.4).
-#[derive(Debug)]
-pub struct AuthRevoked;
-
-impl std::fmt::Display for AuthRevoked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Google Calendar sign-in expired or was revoked")
-    }
-}
-
-impl std::error::Error for AuthRevoked {}
-
-/// A plain 401 from the API: retried once behind a token refresh before it
-/// escalates to [`AuthRevoked`].
-#[derive(Debug)]
-struct Unauthorized;
-
-impl std::fmt::Display for Unauthorized {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Google Calendar rejected the access token")
-    }
-}
-
-impl std::error::Error for Unauthorized {}
-
-#[derive(Debug, Clone)]
-pub struct GoogleClient {
-    pub client_id: String,
-    pub client_secret: Option<String>,
-}
-
-impl GoogleClient {
-    /// The bundled desktop client with any `[google]` override applied.
-    pub fn resolve(overrides: &GoogleClientOverride) -> Result<Self> {
-        let client_id = overrides
-            .client_id
-            .clone()
-            .or_else(|| BUNDLED_CLIENT_ID.map(str::to_string))
-            .context(
-                "no Google OAuth client is available — add [google] client_id \
-                 to .thock/calendar.toml",
-            )?;
-        let client_secret = overrides
-            .client_secret
-            .clone()
-            .or_else(|| BUNDLED_CLIENT_SECRET.map(str::to_string));
-        Ok(Self {
-            client_id,
-            client_secret,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TokenResponse {
-    pub access_token: String,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
-    #[serde(default)]
-    pub expires_in: Option<u64>,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -105,140 +29,6 @@ pub struct CalendarListEntry {
     pub id: String,
     pub summary: String,
     pub primary: bool,
-}
-
-/// The outcome of the connect flow (spec §6.1): the account is identified by
-/// the primary calendar's id, which for Google is the account email.
-pub struct Connected {
-    pub email: String,
-    pub access_token: String,
-    pub calendars: Vec<CalendarListEntry>,
-}
-
-/// Runs the full OAuth 2.0 installed-app flow: loopback listener, system
-/// browser, PKCE code exchange, then `calendarList.list` for the picker.
-/// Stores the refresh token in the keychain before returning.
-pub async fn connect(
-    http: Arc<dyn HttpClient>,
-    client: GoogleClient,
-    cx: &mut AsyncApp,
-) -> Result<Connected> {
-    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(rand::random::<[u8; 32]>());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(Sha256::digest(verifier.as_bytes()));
-    let state = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(rand::random::<[u8; 16]>());
-
-    let (redirect_uri, callback) = oauth_callback_server::start_oauth_callback_server()?;
-    let auth_url = build_auth_url(&client.client_id, &redirect_uri, &challenge, &state);
-    cx.update(|cx| cx.open_url(&auth_url));
-
-    let params = callback
-        .await
-        .context("the sign-in window was closed before authorization completed")??;
-    if params.state != state {
-        bail!("OAuth state mismatch — rejecting the callback");
-    }
-
-    let tokens = exchange_code(&http, &client, &params.code, &verifier, &redirect_uri).await?;
-    let refresh_token = tokens
-        .refresh_token
-        .context("Google did not return a refresh token")?;
-    let calendars = list_calendars(&http, &tokens.access_token).await?;
-    let email = calendars
-        .iter()
-        .find(|entry| entry.primary)
-        .map(|entry| entry.id.clone())
-        .context("no primary calendar in the account's calendar list")?;
-
-    write_refresh_token(&email, &refresh_token, cx).await?;
-    Ok(Connected {
-        email,
-        access_token: tokens.access_token,
-        calendars,
-    })
-}
-
-fn build_auth_url(client_id: &str, redirect_uri: &str, challenge: &str, state: &str) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("response_type", "code")
-        .append_pair("scope", SCOPE)
-        .append_pair("access_type", "offline")
-        .append_pair("prompt", "consent")
-        .append_pair("code_challenge", challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state)
-        .finish();
-    format!("{AUTH_ENDPOINT}?{query}")
-}
-
-async fn exchange_code(
-    http: &Arc<dyn HttpClient>,
-    client: &GoogleClient,
-    code: &str,
-    verifier: &str,
-    redirect_uri: &str,
-) -> Result<TokenResponse> {
-    let mut params = vec![
-        ("client_id", client.client_id.as_str()),
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("code_verifier", verifier),
-        ("redirect_uri", redirect_uri),
-    ];
-    if let Some(secret) = &client.client_secret {
-        params.push(("client_secret", secret));
-    }
-    post_token_request(http, &params).await
-}
-
-/// Mints a fresh access token from the stored refresh token. `invalid_grant`
-/// means the user revoked access — surfaced as [`AuthRevoked`].
-pub async fn refresh_access_token(
-    http: &Arc<dyn HttpClient>,
-    client: &GoogleClient,
-    refresh_token: &str,
-) -> Result<TokenResponse> {
-    let mut params = vec![
-        ("client_id", client.client_id.as_str()),
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-    ];
-    if let Some(secret) = &client.client_secret {
-        params.push(("client_secret", secret));
-    }
-    post_token_request(http, &params).await
-}
-
-async fn post_token_request(
-    http: &Arc<dyn HttpClient>,
-    params: &[(&str, &str)],
-) -> Result<TokenResponse> {
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(params.iter().copied())
-        .finish();
-    let request = Request::builder()
-        .method(http::Method::POST)
-        .uri(TOKEN_ENDPOINT)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", "application/json")
-        .body(AsyncBody::from(body.into_bytes()))?;
-    let mut response = http.send(request).await?;
-    let mut body = String::new();
-    response.body_mut().read_to_string(&mut body).await?;
-    if !response.status().is_success() {
-        if body.contains("invalid_grant") {
-            return Err(anyhow!(AuthRevoked));
-        }
-        bail!(
-            "Google token request failed with status {}: {body}",
-            response.status()
-        );
-    }
-    serde_json::from_str(&body).context("failed to parse Google token response")
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -620,11 +410,6 @@ impl GoogleProvider {
     }
 }
 
-fn token_lifetime(expires_in: Option<u64>) -> Duration {
-    // A one-minute safety margin so a token is never used mid-expiry.
-    Duration::from_secs(expires_in.unwrap_or(3600).saturating_sub(60).max(60))
-}
-
 impl CalendarProvider for GoogleProvider {
     fn fetch_day(&self, date: NaiveDate, cx: &AsyncApp) -> Task<Result<Fetched>> {
         let inner = self.inner.clone();
@@ -715,7 +500,9 @@ impl ProviderInner {
         {
             Some(token) => token,
             None => {
-                let (_, token) = read_refresh_token(cx)
+                // Legacy fallback: a V8 calendar-only token keeps calendar
+                // sync alive until the first workspace connect upgrades it.
+                let (_, token) = read_refresh_token_allowing_legacy(cx)
                     .await?
                     .ok_or_else(|| anyhow!(AuthRevoked))?;
                 if let Ok(mut state) = self.state.lock() {
@@ -734,29 +521,6 @@ impl ProviderInner {
         }
         Ok(token)
     }
-}
-
-/// `(email, refresh token)` from the keychain, or `None` when nothing is
-/// stored.
-pub async fn read_refresh_token(cx: &AsyncApp) -> Result<Option<(String, String)>> {
-    let provider = cx.update(|cx| zed_credentials_provider::global(cx));
-    let Some((email, token)) = provider.read_credentials(KEYCHAIN_URL, cx).await? else {
-        return Ok(None);
-    };
-    let token = String::from_utf8(token).context("stored refresh token is not UTF-8")?;
-    Ok(Some((email, token)))
-}
-
-pub async fn write_refresh_token(email: &str, token: &str, cx: &AsyncApp) -> Result<()> {
-    let provider = cx.update(|cx| zed_credentials_provider::global(cx));
-    provider
-        .write_credentials(KEYCHAIN_URL, email, token.as_bytes(), cx)
-        .await
-}
-
-pub async fn delete_refresh_token(cx: &AsyncApp) -> Result<()> {
-    let provider = cx.update(|cx| zed_credentials_provider::global(cx));
-    provider.delete_credentials(KEYCHAIN_URL, cx).await
 }
 
 #[cfg(test)]
@@ -911,23 +675,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_url_carries_pkce_and_loopback_redirect() {
-        let url = build_auth_url("client-123", "http://127.0.0.1:9000/callback", "chal", "nonce");
-        assert!(url.starts_with(AUTH_ENDPOINT));
-        for needle in [
-            "client_id=client-123",
-            "redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcallback",
-            "code_challenge=chal",
-            "code_challenge_method=S256",
-            "access_type=offline",
-            "prompt=consent",
-            "state=nonce",
-        ] {
-            assert!(url.contains(needle), "missing {needle} in {url}");
-        }
-    }
-
-    #[test]
     fn fetch_day_events_follows_pagination_and_reports_etag() {
         let http = FakeHttpClient::create(|request| async move {
             let uri = request.uri().to_string();
@@ -978,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_and_invalid_grant_are_typed() {
+    fn unauthorized_is_typed() {
         let http = FakeHttpClient::create(|_| async move {
             Ok(Response::builder()
                 .status(401)
@@ -989,22 +736,6 @@ mod tests {
         let error =
             block_on(fetch_day_events(&http, "token", "primary", date(), None)).unwrap_err();
         assert!(error.is::<Unauthorized>());
-
-        let http = FakeHttpClient::create(|_| async move {
-            Ok(Response::builder()
-                .status(400)
-                .body(AsyncBody::from(
-                    br#"{"error": "invalid_grant"}"#.to_vec(),
-                ))
-                .unwrap())
-        });
-        let http: Arc<dyn HttpClient> = http;
-        let client = GoogleClient {
-            client_id: "id".to_string(),
-            client_secret: None,
-        };
-        let error = block_on(refresh_access_token(&http, &client, "stale")).unwrap_err();
-        assert!(error.is::<AuthRevoked>());
     }
 
     #[test]

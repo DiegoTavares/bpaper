@@ -9,8 +9,9 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use fs::Fs;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity, Window, actions,
+    Action as _, App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId,
+    EventEmitter, FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity,
+    Window, actions,
 };
 use language::Buffer;
 use picker::{Picker, PickerDelegate};
@@ -28,9 +29,10 @@ use crate::calendar::{
     CALENDAR_CONFIG_FILE, CalendarConfig, CalendarProvider, Divergence, Fetched, Reconciled,
     apply_line_edits, parse_calendar_config, reconcile,
 };
-use crate::calendar_google::{
-    self, AuthRevoked, CalendarListEntry, GoogleClient, GoogleProvider,
-};
+use crate::calendar_google::{self, CalendarListEntry, GoogleProvider};
+use crate::gmail::GMAIL_CONFIG_FILE;
+use crate::gmail_service::GmailService;
+use crate::google_auth::{self, AuthRevoked, GoogleClient};
 use crate::notes::NoteKind;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
@@ -46,15 +48,16 @@ const DIVERGENCE_LOG_FILE: &str = "log.jsonl";
 actions!(
     thock,
     [
-        /// Links a Google Calendar so today's meetings appear in today's note.
-        ConnectCalendar,
+        /// Links your Google account so today's meetings appear in today's
+        /// note and emails you label become Backlog tasks.
+        ConnectGoogleWorkspace,
         /// Chooses which of your calendars appear in today's note.
         ChooseCalendars,
         /// Brings today's meetings in the daily note up to date now.
         SyncCalendarNow,
-        /// Stops calendar sync and forgets the Google sign-in. Meetings
-        /// already in your notes stay where they are.
-        DisconnectCalendar,
+        /// Stops calendar sync and email capture and forgets the Google
+        /// sign-in. Everything already in your notes stays where it is.
+        DisconnectGoogleWorkspace,
     ]
 );
 
@@ -76,15 +79,16 @@ pub fn init(cx: &mut App) {
         })
         .detach();
 
-        workspace.register_action(|workspace, _: &ConnectCalendar, window, cx| {
+        workspace.register_action(|workspace, _: &ConnectGoogleWorkspace, window, cx| {
             let workspace_handle = workspace.weak_handle();
+            let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
             if let Some(service) = service_for_workspace(workspace, cx) {
                 if !service.read(cx).has_vault() {
                     show_no_vault_error(workspace, cx);
                     return;
                 }
                 service.update(cx, |service, cx| {
-                    service.connect(workspace_handle, window, cx)
+                    service.connect(gmail, workspace_handle, window, cx)
                 });
             }
         });
@@ -105,9 +109,10 @@ pub fn init(cx: &mut App) {
                 service.update(cx, |service, cx| service.sync_now(cx));
             }
         });
-        workspace.register_action(|workspace, _: &DisconnectCalendar, _window, cx| {
+        workspace.register_action(|workspace, _: &DisconnectGoogleWorkspace, _window, cx| {
+            let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
             if let Some(service) = service_for_workspace(workspace, cx) {
-                service.update(cx, |service, cx| service.disconnect(cx));
+                service.update(cx, |service, cx| service.disconnect(gmail, cx));
             }
         });
     })
@@ -577,10 +582,13 @@ impl CalendarService {
         .detach_and_log_err(cx);
     }
 
-    /// `thock::ConnectCalendar` (spec §6.1): OAuth in the system browser,
-    /// then the calendar picker.
+    /// `thock::ConnectGoogleWorkspace` (spec v9 §6.1): one OAuth round in the
+    /// system browser granting Calendar + Gmail, then the calendar picker.
+    /// Writes the account into both `.thock/calendar.toml` and
+    /// `.thock/gmail.toml` and reloads the Gmail service alongside this one.
     fn connect(
         &mut self,
+        gmail: Option<Entity<GmailService>>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -593,6 +601,12 @@ impl CalendarService {
             .config
             .as_ref()
             .map(|config| config.google.clone())
+            .filter(|overrides| overrides.client_id.is_some())
+            .or_else(|| {
+                gmail
+                    .as_ref()
+                    .and_then(|gmail| gmail.read(cx).google_override())
+            })
             .unwrap_or_default();
         let existing_calendars = self
             .config
@@ -603,28 +617,42 @@ impl CalendarService {
         let fs = self.project.read(cx).fs().clone();
         self.state = SyncState::Connecting;
         cx.notify();
+        if let Some(gmail) = &gmail {
+            gmail.update(cx, |gmail, cx| gmail.mark_connecting(cx));
+        }
 
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 let client = GoogleClient::resolve(&overrides)?;
-                let connected = calendar_google::connect(http, client, cx).await?;
+                let connected = google_auth::connect_workspace(http, client, cx).await?;
                 let email = connected.email.clone();
                 let selected = if existing_calendars.is_empty() {
                     vec![email.clone()]
                 } else {
                     existing_calendars
                 };
-                update_calendar_config_file(&fs, &vault_root, move |table| {
+                update_config_file(&fs, &vault_root, CALENDAR_CONFIG_FILE, {
+                    let email = email.clone();
+                    move |table| {
+                        table.insert("schema".into(), 1.into());
+                        table.insert("account".into(), email.into());
+                        if !table.contains_key("calendars") {
+                            table.insert(
+                                "calendars".into(),
+                                toml::Value::Array(
+                                    selected.into_iter().map(toml::Value::String).collect(),
+                                ),
+                            );
+                        }
+                    }
+                })
+                .await?;
+                // Connecting the Workspace arms email capture with its
+                // defaults; an absent Gmail label costs nothing (spec v9 §12
+                // Q2), and deleting gmail.toml turns the feature back off.
+                update_config_file(&fs, &vault_root, GMAIL_CONFIG_FILE, move |table| {
                     table.insert("schema".into(), 1.into());
                     table.insert("account".into(), email.into());
-                    if !table.contains_key("calendars") {
-                        table.insert(
-                            "calendars".into(),
-                            toml::Value::Array(
-                                selected.into_iter().map(toml::Value::String).collect(),
-                            ),
-                        );
-                    }
                 })
                 .await?;
                 anyhow::Ok(connected)
@@ -635,12 +663,15 @@ impl CalendarService {
                 Ok(connected) => {
                     this.update_in(cx, |service, window, cx| {
                         service.reload(cx);
-                        service.open_picker(workspace, connected.calendars, window, cx);
+                        service.open_picker(workspace, connected.calendars, true, window, cx);
                     })
                     .log_err();
+                    if let Some(gmail) = &gmail {
+                        gmail.update(cx, |gmail, cx| gmail.reload_config(cx));
+                    }
                 }
                 Err(error) => {
-                    log::warn!("Thock: connecting a calendar failed: {error:#}");
+                    log::warn!("Thock: connecting Google Workspace failed: {error:#}");
                     this.update(cx, |service, cx| {
                         service.state = SyncState::Failing {
                             error: format!("{error:#}").into(),
@@ -648,6 +679,9 @@ impl CalendarService {
                         cx.notify();
                     })
                     .log_err();
+                    if let Some(gmail) = &gmail {
+                        gmail.update(cx, |gmail, cx| gmail.reload_config(cx));
+                    }
                 }
             }
         }));
@@ -673,11 +707,13 @@ impl CalendarService {
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 let client = GoogleClient::resolve(&overrides)?;
-                let (_, refresh_token) = calendar_google::read_refresh_token(cx)
+                let (_, refresh_token) = google_auth::read_refresh_token_allowing_legacy(cx)
                     .await?
-                    .context("no calendar is connected yet — run “connect calendar” first")?;
+                    .context(
+                        "no Google account is connected yet — run “connect google workspace” first",
+                    )?;
                 let tokens =
-                    calendar_google::refresh_access_token(&http, &client, &refresh_token).await?;
+                    google_auth::refresh_access_token(&http, &client, &refresh_token).await?;
                 calendar_google::list_calendars(&http, &tokens.access_token).await
             }
             .await;
@@ -685,7 +721,7 @@ impl CalendarService {
             match result {
                 Ok(calendars) => {
                     this.update_in(cx, |service, window, cx| {
-                        service.open_picker(workspace, calendars, window, cx);
+                        service.open_picker(workspace, calendars, false, window, cx);
                     })
                     .log_err();
                 }
@@ -711,6 +747,7 @@ impl CalendarService {
         &mut self,
         workspace: WeakEntity<Workspace>,
         entries: Vec<CalendarListEntry>,
+        offer_email_import: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -737,6 +774,7 @@ impl CalendarService {
                         entries,
                         selected,
                         selected_index: 0,
+                        offer_email_import,
                     };
                     CalendarPicker::new(delegate, window, cx)
                 });
@@ -751,16 +789,20 @@ impl CalendarService {
         }
     }
 
-    /// `thock::DisconnectCalendar` (spec §6.4): deletes the keychain entry
-    /// and stops syncing. Never touches the note.
-    fn disconnect(&mut self, cx: &mut Context<Self>) {
+    /// `thock::DisconnectGoogleWorkspace` (spec §6.4): deletes the keychain
+    /// entries and stops calendar sync and email capture. Never touches the
+    /// vault.
+    fn disconnect(&mut self, gmail: Option<Entity<GmailService>>, cx: &mut Context<Self>) {
         self.poll_task = None;
         self.provider = None;
         if self.config.is_some() {
             self.state = SyncState::NeverConnected;
         }
         cx.notify();
-        cx.spawn(async move |_, cx| calendar_google::delete_refresh_token(cx).await)
+        if let Some(gmail) = gmail {
+            gmail.update(cx, |gmail, cx| gmail.mark_signed_out(cx));
+        }
+        cx.spawn(async move |_, cx| google_auth::delete_refresh_token(cx).await)
             .detach_and_log_err(cx);
     }
 
@@ -780,15 +822,16 @@ impl CalendarService {
     }
 }
 
-/// Rewrites `.thock/calendar.toml` with `mutate` applied to its top-level
-/// table, preserving any fields this build doesn't know about. Comments are
-/// not preserved (same trade-off as the vault config rewrites).
-async fn update_calendar_config_file(
+/// Rewrites a `.thock/<file_name>` TOML with `mutate` applied to its
+/// top-level table, preserving any fields this build doesn't know about.
+/// Comments are not preserved (same trade-off as the vault config rewrites).
+pub(crate) async fn update_config_file(
     fs: &Arc<dyn Fs>,
     vault_root: &Path,
+    file_name: &str,
     mutate: impl FnOnce(&mut toml::Table),
 ) -> Result<()> {
-    let path = vault_root.join(VAULT_MARKER_DIR).join(CALENDAR_CONFIG_FILE);
+    let path = vault_root.join(VAULT_MARKER_DIR).join(file_name);
     let existing = fs.load(&path).await.unwrap_or_default();
     let mut table: toml::Table = toml::from_str(&existing)
         .with_context(|| format!("parsing {}", path.display()))?;
@@ -838,6 +881,10 @@ pub struct CalendarPickerDelegate {
     matches: Vec<usize>,
     selected: HashSet<String>,
     selected_index: usize,
+    /// Set by the connect flow (spec v9 §6.1): after this picker saves, the
+    /// email import-mode picker opens, so the capture style is a deliberate
+    /// choice instead of an invisible default.
+    offer_email_import: bool,
 }
 
 impl PickerDelegate for CalendarPickerDelegate {
@@ -907,7 +954,14 @@ impl PickerDelegate for CalendarPickerDelegate {
         cx.notify();
     }
 
-    fn dismissed(&mut self, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
+    fn dismissed(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        if self.offer_email_import {
+            // Deferred internally, so it runs after this modal is gone.
+            window.dispatch_action(
+                crate::gmail_service::ChooseEmailImportMode.boxed_clone(),
+                cx,
+            );
+        }
         let calendars: Vec<String> = self
             .entries
             .iter()
@@ -918,7 +972,7 @@ impl PickerDelegate for CalendarPickerDelegate {
         let vault_root = self.vault_root.clone();
         let service = self.service.clone();
         cx.spawn(async move |_, cx| {
-            update_calendar_config_file(&fs, &vault_root, move |table| {
+            update_config_file(&fs, &vault_root, CALENDAR_CONFIG_FILE, move |table| {
                 table.insert(
                     "calendars".into(),
                     toml::Value::Array(calendars.into_iter().map(toml::Value::String).collect()),
