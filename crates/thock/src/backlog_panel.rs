@@ -29,6 +29,7 @@ use workspace::{OpenOptions, OpenVisible, Workspace};
 
 use crate::backlog::{self, Backlog, BacklogTask, SectionKind, parse_backlog, split_completion};
 use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
+use crate::day_plan::strip_trailing_comment;
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
 use crate::markdown_text::{InlineSpan, parse_inline_links};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
@@ -692,7 +693,9 @@ impl BacklogPanel {
     ) {
         let editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_text(initial_text, window, cx);
+            // The hidden trailing comment stays out of the editor too;
+            // `commit_edit` re-attaches it so a rename can't destroy it.
+            editor.set_text(strip_trailing_comment(initial_text), window, cx);
             if let EditTarget::New { .. } = target {
                 editor.set_placeholder_text("New task", window, cx);
             }
@@ -753,9 +756,12 @@ impl BacklogPanel {
                 original_text,
             } => {
                 // Committing an empty string is a revert, not a delete (§6.2).
-                if new_text.is_empty() || new_text == original_text {
+                // The editor showed the text without its hidden trailing
+                // comment, so "unchanged" is judged against that view.
+                if new_text.is_empty() || new_text == strip_trailing_comment(&original_text) {
                     return;
                 }
+                let new_text = restore_hidden_suffix(&original_text, &new_text);
                 let Some(buffer) = self.buffer.clone() else {
                     self.show_error(
                         "backlog.md is no longer open, so the edit wasn't applied.".to_string(),
@@ -1078,6 +1084,10 @@ impl BacklogPanel {
     /// the text element only — the caller wraps it in the `LabelLike` that
     /// carries the row's size, color and truncation.
     fn render_task_text(&self, id: ElementId, text: &str, cx: &Context<Self>) -> AnyElement {
+        // A trailing `<!-- … -->` (e.g. a capture marker) is identity, not
+        // content — hidden here exactly as the Day Planner hides it (v8
+        // §11.4); the file keeps it.
+        let text = strip_trailing_comment(text);
         let spans = parse_inline_links(text);
         if !spans
             .iter()
@@ -1531,6 +1541,18 @@ impl BacklogPanel {
     }
 }
 
+/// Re-attaches the trailing HTML comment `strip_trailing_comment` hid from
+/// the inline editor, so renaming a captured task keeps its identity marker.
+fn restore_hidden_suffix(original: &str, edited: &str) -> String {
+    let visible = strip_trailing_comment(original);
+    let hidden = original[visible.len()..].trim();
+    if hidden.is_empty() {
+        edited.to_string()
+    } else {
+        format!("{edited} {hidden}")
+    }
+}
+
 fn format_ago(elapsed: Duration) -> String {
     let minutes = elapsed.as_secs() / 60;
     match minutes {
@@ -1631,5 +1653,24 @@ impl Panel for BacklogPanel {
         // Must be unique across all panels; 0-9 are taken (0-3 and 5-7
         // upstream, 4 Timeline, 8 Day Planner, 9 Agent).
         10
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restore_hidden_suffix;
+
+    #[test]
+    fn renames_keep_the_hidden_trailing_comment() {
+        assert_eq!(
+            restore_hidden_suffix("Pay invoice <!--gmail:9f2c1ab4e7d0-->", "Pay invoice today"),
+            "Pay invoice today <!--gmail:9f2c1ab4e7d0-->"
+        );
+        assert_eq!(restore_hidden_suffix("Plain task", "Renamed task"), "Renamed task");
+        // A mid-line comment is visible content, not identity — untouched.
+        assert_eq!(
+            restore_hidden_suffix("a <!-- note --> b", "a <!-- note --> c"),
+            "a <!-- note --> c"
+        );
     }
 }
