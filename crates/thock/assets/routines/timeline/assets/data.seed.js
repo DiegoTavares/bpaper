@@ -16,8 +16,30 @@
 //     { name: "Scheduler", goal: true, tasks: [ "task one" ] }  // omit `goal` when not a week goal
 //   ],
 //   prs: {
-//     created:  [ { ref: "OpenCue#2425", title: "…", status: "open", src: "github" } ],
-//     reviewed: [ { ref: "spi-centos!18", title: "…", src: "gitlab" } ]
+//     created:  [ { ref: "webapp#2425", title: "…", status: "open", src: "github" } ],
+//     reviewed: [ { ref: "platform-api!18", title: "…", src: "gitlab" } ]
 //   }
 // }
 window.WEEKS = [];
+
+// Repo short-name → full path, so refs in the feed become clickable links.
+// Add a row the first time a repository shows up; unmapped refs still render
+// as plain text. `host` is your GitLab instance (self-hosted or gitlab.com).
+window.REPOS = {
+  github: {
+    // webapp: "your-org/webapp"
+  },
+  gitlab: {
+    host: "",
+    paths: {
+      // "platform-api": "your-group/platform-api"
+    }
+  }
+};
+
+// Optional [pattern, canonical name] pairs (matched case-insensitively, first
+// match wins) that fold project-name drift together so the dashboard's
+// lingering-project detection survives "api" vs "API / Platform".
+window.PROJECT_ALIASES = [
+  // ["platform|api", "Platform API"]
+];

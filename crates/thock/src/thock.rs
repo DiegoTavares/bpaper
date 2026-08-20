@@ -12,6 +12,8 @@ pub mod gmail_google;
 pub mod gmail_service;
 pub mod google_auth;
 pub mod history;
+pub mod markdown_conceal;
+pub mod markdown_syntax;
 pub mod markdown_text;
 pub mod notes;
 pub mod routines;
@@ -39,6 +41,7 @@ pub fn init(cx: &mut App) {
     backlog_panel::init(cx);
     calendar_service::init(cx);
     gmail_service::init(cx);
+    markdown_conceal::init(cx);
 }
 
 /// Opens `path` and lands the user on a rendered markdown preview of it

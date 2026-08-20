@@ -1723,4 +1723,11 @@
       "cmd-c": "thock::CopyBacklogTask",
     },
   },
+  {
+    "context": "Editor && ThockMarkdownConceal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-alt-m": "thock::ToggleMarkdownSource",
+    },
+  },
 ]

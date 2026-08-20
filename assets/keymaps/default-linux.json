@@ -1634,4 +1634,11 @@
       "ctrl-c": "thock::CopyBacklogTask",
     },
   },
+  {
+    "context": "Editor && ThockMarkdownConceal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-alt-m": "thock::ToggleMarkdownSource",
+    },
+  },
 ]
