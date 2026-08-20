@@ -20,6 +20,8 @@ pub enum SpanKind {
     WikilinkLabel,
     /// A `[text](dest)` label — an external link.
     LinkLabel,
+    /// A task list item's `[ ]` / `[x]` marker, drawn as a checkbox.
+    Checkbox(bool),
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -41,6 +43,62 @@ impl ConcealSpan {
 /// spans at all — half-typed text renders exactly as typed (C3).
 pub fn conceal_spans(text: &str) -> Vec<ConcealSpan> {
     let mut spans = Vec::new();
+    each_content_line(text, |line_start, line| {
+        if is_thematic_break(line) {
+            spans.push(ConcealSpan::new(
+                line_start..line_start + line.len(),
+                SpanKind::Rule,
+            ));
+            return;
+        }
+        scan_line(line, line_start, &mut spans);
+    });
+    spans
+}
+
+/// A `[[wikilink]]` located under a cursor: the full construct's byte range
+/// and the target note's byte range (the part before the `|` of an alias).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WikilinkReference {
+    pub range: Range<usize>,
+    pub target: Range<usize>,
+}
+
+/// The wikilink whose `[[...]]` construct contains byte `offset` — anywhere
+/// on the brackets, target, or alias counts. Honours the same exclusions as
+/// `conceal_spans`: nothing inside fences, front matter, or inline code, and
+/// `![[embeds]]` don't count.
+pub fn wikilink_at(text: &str, offset: usize) -> Option<WikilinkReference> {
+    let mut found = None;
+    each_content_line(text, |line_start, line| {
+        if found.is_some() || offset < line_start || offset > line_start + line.len() {
+            return;
+        }
+        let excluded = inline_exclusions(line);
+        each_inline_link(line, 0, &excluded, |link| {
+            let range = line_start + link.range.start..line_start + link.range.end;
+            if range.contains(&offset) {
+                if let Some(target) = link.wikilink_target {
+                    found = Some(WikilinkReference {
+                        target: line_start + target.start..line_start + target.end,
+                        range,
+                    });
+                }
+                return false;
+            }
+            // Links are ordered, so once one ends past the offset none of
+            // the rest can contain it.
+            range.end <= offset
+        });
+    });
+    found
+}
+
+/// Calls `f` with `(line_start, line)` for every line outside fenced code
+/// blocks and YAML front matter — the shared exclusion state machine (C1/C2)
+/// behind `conceal_spans` and `wikilink_at`. `line` excludes any trailing
+/// carriage return.
+fn each_content_line(text: &str, mut f: impl FnMut(usize, &str)) {
     let mut fence: Option<(u8, usize)> = None;
     let mut front_matter = false;
     let mut offset = 0;
@@ -71,16 +129,8 @@ pub fn conceal_spans(text: &str) -> Vec<ConcealSpan> {
             fence = Some(opened);
             continue;
         }
-        if is_thematic_break(line) {
-            spans.push(ConcealSpan::new(
-                line_start..line_start + line.len(),
-                SpanKind::Rule,
-            ));
-            continue;
-        }
-        scan_line(line, line_start, &mut spans);
+        f(line_start, line);
     }
-    spans
 }
 
 /// The indent of a line that can still open a block construct (0–3 spaces),
@@ -161,6 +211,7 @@ fn atx_heading(line: &str) -> Option<(u8, usize, usize)> {
 
 fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
     let code_spans = code_span_ranges(line);
+    let comments = html_comment_ranges(line, &code_spans);
     let mut inline_from = 0;
 
     if let Some((level, marker_start, text_start)) = atx_heading(line) {
@@ -179,9 +230,23 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
             SpanKind::Heading(level),
         ));
         inline_from = text_start;
+    } else if let Some((range, checked)) = task_checkbox(line) {
+        spans.push(ConcealSpan::new(
+            line_start + range.start..line_start + range.end,
+            SpanKind::Checkbox(checked),
+        ));
+        inline_from = range.end;
     }
 
-    scan_inline(line, inline_from, line_start, &code_spans, spans);
+    for comment in &comments {
+        spans.push(ConcealSpan::new(
+            line_start + comment.start..line_start + comment.end,
+            SpanKind::Marker,
+        ));
+    }
+
+    let excluded: Vec<Range<usize>> = code_spans.into_iter().chain(comments).collect();
+    scan_inline(line, inline_from, line_start, &excluded, spans);
 }
 
 /// The ranges of inline code spans in `line`, delimiters included. Backtick
@@ -220,18 +285,115 @@ fn code_span_ranges(line: &str) -> Vec<Range<usize>> {
     ranges
 }
 
-fn overlaps_code(code_spans: &[Range<usize>], range: &Range<usize>) -> bool {
-    code_spans
+/// The line ranges no inline construct may overlap — inline code spans and
+/// HTML comments — merged into one list.
+fn inline_exclusions(line: &str) -> Vec<Range<usize>> {
+    let code_spans = code_span_ranges(line);
+    let comments = html_comment_ranges(line, &code_spans);
+    code_spans.into_iter().chain(comments).collect()
+}
+
+/// The ranges of single-line `<!-- … -->` comments, delimiters included. A
+/// comment that never closes on its line, or one inside inline code, is
+/// left visible (C3) — as is a comment spanning several lines, since hiding
+/// it would fold the newlines that separate the surrounding prose.
+fn html_comment_ranges(line: &str, code_spans: &[Range<usize>]) -> Vec<Range<usize>> {
+    const OPEN: &str = "<!--";
+    const CLOSE: &str = "-->";
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while let Some(open) = line[cursor..].find(OPEN).map(|index| index + cursor) {
+        let body = open + OPEN.len();
+        let Some(close) = line[body..].find(CLOSE).map(|index| index + body + CLOSE.len()) else {
+            break;
+        };
+        let range = open..close;
+        if !overlaps_excluded(code_spans, &range) {
+            ranges.push(range);
+        }
+        cursor = close;
+    }
+    ranges
+}
+
+/// The `[ ]` / `[x]` marker of a task list item and whether it is checked.
+/// A bullet must come first and a space or end of line must follow, so a
+/// stray `[x]` in prose is left alone (C3). Any indent counts — nested tasks
+/// are still tasks.
+fn task_checkbox(line: &str) -> Option<(Range<usize>, bool)> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let after_bullet = line[indent..].strip_prefix(['-', '*', '+'])?;
+    let after_space = after_bullet.trim_start_matches([' ', '\t']);
+    if after_space.len() == after_bullet.len() {
+        return None;
+    }
+    let mut characters = after_space.strip_prefix('[')?.chars();
+    let checked = match characters.next()? {
+        ' ' => false,
+        'x' | 'X' => true,
+        _ => return None,
+    };
+    let after_checkbox = characters.as_str().strip_prefix(']')?;
+    if !after_checkbox.is_empty() && !after_checkbox.starts_with([' ', '\t']) {
+        return None;
+    }
+    let end = line.len() - after_checkbox.len();
+    Some((end - "[ ]".len()..end, checked))
+}
+
+fn overlaps_excluded(excluded: &[Range<usize>], range: &Range<usize>) -> bool {
+    excluded
         .iter()
-        .any(|code| code.start < range.end && range.start < code.end)
+        .any(|other| other.start < range.end && range.start < other.end)
 }
 
 fn scan_inline(
     line: &str,
     from: usize,
     line_start: usize,
-    code_spans: &[Range<usize>],
+    excluded: &[Range<usize>],
     spans: &mut Vec<ConcealSpan>,
+) {
+    each_inline_link(line, from, excluded, |link| {
+        let kind = if link.wikilink_target.is_some() {
+            SpanKind::WikilinkLabel
+        } else {
+            SpanKind::LinkLabel
+        };
+        spans.push(ConcealSpan::new(
+            line_start + link.range.start..line_start + link.label.start,
+            SpanKind::Marker,
+        ));
+        spans.push(ConcealSpan::new(
+            line_start + link.label.start..line_start + link.label.end,
+            kind,
+        ));
+        spans.push(ConcealSpan::new(
+            line_start + link.label.end..line_start + link.range.end,
+            SpanKind::Marker,
+        ));
+        true
+    });
+}
+
+/// A well-formed link parsed from a single line, all ranges line-relative.
+struct ParsedLink {
+    /// The full construct: `[[...]]` or `[text](dest)`.
+    range: Range<usize>,
+    /// The displayed text — the wikilink target or alias, or the link label.
+    label: Range<usize>,
+    /// The note a `[[wikilink]]` points at; `None` for `[text](dest)` links.
+    wikilink_target: Option<Range<usize>>,
+}
+
+/// Walks the well-formed links of `line` from `from`, skipping images,
+/// embeds, escapes, and anything overlapping an excluded range. `visit`
+/// returns whether to keep walking.
+fn each_inline_link(
+    line: &str,
+    from: usize,
+    excluded: &[Range<usize>],
+    mut visit: impl FnMut(ParsedLink) -> bool,
 ) {
     let bytes = line.as_bytes();
     let mut cursor = from;
@@ -243,8 +405,8 @@ fn scan_inline(
             cursor = open + 1;
             continue;
         }
-        if let Some(code) = code_spans.iter().find(|code| code.contains(&open)) {
-            cursor = code.end;
+        if let Some(range) = excluded.iter().find(|range| range.contains(&open)) {
+            cursor = range.end;
             continue;
         }
 
@@ -254,21 +416,19 @@ fn scan_inline(
             parse_inline_link(line, open)
         };
         match parsed {
-            Some((mut link_spans, end)) if !overlaps_code(code_spans, &(open..end)) => {
-                for span in &mut link_spans {
-                    span.range = line_start + span.range.start..line_start + span.range.end;
+            Some(link) if !overlaps_excluded(excluded, &link.range) => {
+                cursor = link.range.end;
+                if !visit(link) {
+                    return;
                 }
-                spans.append(&mut link_spans);
-                cursor = end;
             }
             _ => cursor = open + 1,
         }
     }
 }
 
-/// Parses `[[target]]` or `[[target|alias]]` at `open`, returning the spans
-/// (line-relative) and the offset just past the closing `]]`.
-fn parse_wikilink(line: &str, open: usize) -> Option<(Vec<ConcealSpan>, usize)> {
+/// Parses `[[target]]` or `[[target|alias]]` at `open`.
+fn parse_wikilink(line: &str, open: usize) -> Option<ParsedLink> {
     let inner_start = open + 2;
     let close = line[inner_start..].find("]]")? + inner_start;
     let inner = &line[inner_start..close];
@@ -276,31 +436,26 @@ fn parse_wikilink(line: &str, open: usize) -> Option<(Vec<ConcealSpan>, usize)> 
     if inner.is_empty() || inner.contains('[') || inner.contains(']') {
         return None;
     }
-    let spans = match inner.split_once('|') {
+    let (target, label) = match inner.split_once('|') {
         Some((target, alias)) => {
             if target.is_empty() || alias.is_empty() {
                 return None;
             }
             let alias_start = inner_start + target.len() + 1;
-            vec![
-                ConcealSpan::new(open..alias_start, SpanKind::Marker),
-                ConcealSpan::new(alias_start..close, SpanKind::WikilinkLabel),
-                ConcealSpan::new(close..end, SpanKind::Marker),
-            ]
+            (inner_start..inner_start + target.len(), alias_start..close)
         }
-        None => vec![
-            ConcealSpan::new(open..inner_start, SpanKind::Marker),
-            ConcealSpan::new(inner_start..close, SpanKind::WikilinkLabel),
-            ConcealSpan::new(close..end, SpanKind::Marker),
-        ],
+        None => (inner_start..close, inner_start..close),
     };
-    Some((spans, end))
+    Some(ParsedLink {
+        range: open..end,
+        label,
+        wikilink_target: Some(target),
+    })
 }
 
-/// Parses `[text](dest)` at `open`, returning the spans (line-relative) and
-/// the offset just past the closing paren. `dest` may contain balanced
-/// parens, as real URLs do.
-fn parse_inline_link(line: &str, open: usize) -> Option<(Vec<ConcealSpan>, usize)> {
+/// Parses `[text](dest)` at `open`. `dest` may contain balanced parens, as
+/// real URLs do.
+fn parse_inline_link(line: &str, open: usize) -> Option<ParsedLink> {
     let text_start = open + 1;
     let text_end = line[text_start..].find(']')? + text_start;
     let text = &line[text_start..text_end];
@@ -330,14 +485,11 @@ fn parse_inline_link(line: &str, open: usize) -> Option<(Vec<ConcealSpan>, usize
     }
     let close = close?;
     let end = close + 1;
-    Some((
-        vec![
-            ConcealSpan::new(open..text_start, SpanKind::Marker),
-            ConcealSpan::new(text_start..text_end, SpanKind::LinkLabel),
-            ConcealSpan::new(text_end..end, SpanKind::Marker),
-        ],
-        end,
-    ))
+    Some(ParsedLink {
+        range: open..end,
+        label: text_start..text_end,
+        wikilink_target: None,
+    })
 }
 
 #[cfg(test)]
@@ -580,6 +732,150 @@ mod tests {
                 ("](c)", SpanKind::Marker),
             ]
         );
+    }
+
+    /// The `(construct, target)` slices of the wikilink at `offset`.
+    fn reference(text: &str, offset: usize) -> Option<(&str, &str)> {
+        wikilink_at(text, offset)
+            .map(|reference| (&text[reference.range.clone()], &text[reference.target]))
+    }
+
+    #[test]
+    fn wikilink_at_finds_the_construct_from_any_of_its_columns() {
+        let text = "see [[wiki]] end";
+        for offset in 4..12 {
+            assert_eq!(
+                reference(text, offset),
+                Some(("[[wiki]]", "wiki")),
+                "offset {offset}"
+            );
+        }
+        assert_eq!(reference(text, 3), None);
+        assert_eq!(reference(text, 12), None);
+    }
+
+    #[test]
+    fn wikilink_at_returns_the_target_of_an_aliased_link() {
+        let text = "[[projects/thock|the app]]";
+        // On the alias, on the pipe, and on the brackets all count.
+        for offset in [0, 10, 16, 20, 25] {
+            assert_eq!(
+                reference(text, offset),
+                Some(("[[projects/thock|the app]]", "projects/thock")),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn wikilink_at_honours_the_conceal_exclusions() {
+        assert_eq!(reference("```\n[[x]]\n```\n", 6), None);
+        assert_eq!(reference("a `[[x]]` b", 4), None);
+        assert_eq!(reference("![[embed]]", 4), None);
+        assert_eq!(reference("---\nkey: [[x]]\n---\n", 10), None);
+        assert_eq!(reference("[[unclosed", 1), None);
+    }
+
+    #[test]
+    fn wikilink_at_respects_line_boundaries() {
+        let text = "plain\n[[a]]\n[[b]]\n";
+        assert_eq!(reference(text, 6), Some(("[[a]]", "a")));
+        assert_eq!(reference(text, 10), Some(("[[a]]", "a")));
+        // The newline after `[[a]]` is past the construct.
+        assert_eq!(reference(text, 11), None);
+        assert_eq!(reference(text, 12), Some(("[[b]]", "b")));
+        assert_eq!(reference(text, 0), None);
+        assert_eq!(reference(text, text.len() + 10), None);
+    }
+
+    #[test]
+    fn wikilink_at_ignores_external_links_but_finds_later_wikilinks() {
+        let text = "[docs](https://a.example) then [[note]]";
+        assert_eq!(reference(text, 2), None);
+        assert_eq!(reference(text, 33), Some(("[[note]]", "note")));
+    }
+
+    #[test]
+    fn task_checkboxes_conceal_the_brackets_and_carry_their_state() {
+        assert_eq!(
+            slices("- [ ] open task\n"),
+            vec![("[ ]", SpanKind::Checkbox(false))]
+        );
+        assert_eq!(
+            slices("* [x] done\n+ [X] also done\n"),
+            vec![
+                ("[x]", SpanKind::Checkbox(true)),
+                ("[X]", SpanKind::Checkbox(true)),
+            ]
+        );
+        // Nested tasks are tasks, and an empty task is still a checkbox.
+        assert_eq!(
+            slices("    - [ ] nested\n"),
+            vec![("[ ]", SpanKind::Checkbox(false))]
+        );
+        assert_eq!(slices("- [ ]\n"), vec![("[ ]", SpanKind::Checkbox(false))]);
+    }
+
+    #[test]
+    fn checkbox_lookalikes_are_left_alone() {
+        for line in [
+            "[ ] no bullet\n",
+            "-[ ] no space after the bullet\n",
+            "- [] empty brackets\n",
+            "- [y] not a state\n",
+            "- [ ]text with no gap\n",
+            "1. [ ] ordered lists are not task lists here\n",
+            "```\n- [ ] in a fence\n```\n",
+        ] {
+            assert_eq!(spans(line), vec![], "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_task_line_still_scans_its_links() {
+        assert_eq!(
+            slices("- [x] read [[notes/spec]]\n"),
+            vec![
+                ("[x]", SpanKind::Checkbox(true)),
+                ("[[", SpanKind::Marker),
+                ("notes/spec", SpanKind::WikilinkLabel),
+                ("]]", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn html_comments_are_concealed_whole() {
+        assert_eq!(
+            slices("task <!--gmail:9f2c--> tail\n"),
+            vec![("<!--gmail:9f2c-->", SpanKind::Marker)]
+        );
+        assert_eq!(
+            slices("<!--a--> mid <!--b-->\n"),
+            vec![("<!--a-->", SpanKind::Marker), ("<!--b-->", SpanKind::Marker)]
+        );
+        // The empty comment closes on its own dashes.
+        assert_eq!(
+            slices("<!---->\n"),
+            vec![("<!---->", SpanKind::Marker)]
+        );
+    }
+
+    #[test]
+    fn unclosed_and_multi_line_comments_stay_visible() {
+        assert_eq!(spans("half <!-- open\n"), vec![]);
+        assert_eq!(spans("<!--\nspanning\n-->\n"), vec![]);
+        assert_eq!(spans("a `<!--code-->` b\n"), vec![]);
+        assert_eq!(spans("```\n<!--fenced-->\n```\n"), vec![]);
+    }
+
+    #[test]
+    fn markup_inside_a_comment_is_not_scanned_separately() {
+        assert_eq!(
+            slices("note <!-- [[hidden]] [text](url) -->\n"),
+            vec![("<!-- [[hidden]] [text](url) -->", SpanKind::Marker)]
+        );
+        assert_eq!(wikilink_at("note <!-- [[hidden]] -->", 13), None);
     }
 
     #[test]

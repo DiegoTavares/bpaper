@@ -135,6 +135,8 @@ no async syntax-tree availability. `markdown_text.rs` is the precedent for this 
 | Wikilink with alias | `[[target\|alias]]` | `[[`, `target\|`, and `]]` | `alias` |
 | Inline link | `[text](dest)` | `[` and `](dest)` | `text` |
 | Thematic break | `^ {0,3}_{3,}[ \t]*$` | the entire line's text | — (drawn, see §7.3) |
+| Task checkbox | `^[ \t]*[-*+][ \t]+\[( \|x\|X)\]([ \t]\|$)` | the `[ ]` / `[x]` brackets | — (drawn, see §7.4) |
+| HTML comment | `<!-- … -->`, opened and closed on one line | the whole comment, delimiters included | — |
 
 Rules that apply to all of them:
 
@@ -148,6 +150,13 @@ Rules that apply to all of them:
 - **C4** — `![alt](src)` is not a link for our purposes; the `!` prefix disqualifies the match.
 - **C5** — An inline link whose `text` is empty conceals nothing (there would be nothing left to
   show).
+- **C6** — A checkbox needs a list bullet before it and a space or end of line after, so a `[x]`
+  written in prose is not a task. Indentation is unrestricted: a nested task is still a task.
+- **C7** — A comment that does not close on its own line is left visible, like any other malformed
+  construct. Hiding a multi-line comment would have to fold the newlines between the prose around
+  it, which is a different (and lossier) gesture than hiding markup.
+- **C8** — Markup inside a concealed comment is not scanned separately: a `[[wikilink]]` in a
+  comment neither colours nor resolves. Concealed comments join inline code as an exclusion zone.
 
 ## 7. Colour and drawing
 
@@ -174,6 +183,14 @@ the point of colouring them at all.
 The whole line's text is folded; the placeholder renders a 1px full-width div. The renderer receives
 `max_width` in its `ChunkRendererContext` (`crates/editor/src/element.rs:7153`), so a real
 edge-to-edge rule is drawable rather than a fixed-width stub.
+
+### 7.4 Task checkboxes
+
+The `[ ]` / `[x]` folds to a drawn box: a 13px bordered square, filled with the app's `Check` icon
+in the accent colour when the task is done, so a note's tasks read the way they do in every other
+Thock surface. The list bullet is left alone — it is the user's text, and hiding it would change
+what the line *is*, not just how its markup looks. The box is display-only; ticking a checkbox by
+clicking it would be a buffer write and belongs with the Day Planner's task actions, not here.
 
 ## 8. Architecture
 
@@ -387,3 +404,19 @@ debounce (A2 held), reparse debounced at 50 ms on a background task, folds appli
 move, and A6 verified — no Thock panel reads display text. The scanner lives in
 `markdown_syntax.rs` with the unit suite; the editor behaviour is covered by GPUI tests in
 `markdown_conceal.rs`, including the G3 bytes-untouched assertion.
+
+One addition landed post-review: **go-to-definition on wikilinks**. `g d` / `editor::GoToDefinition`
+with the newest cursor anywhere on a `[[wikilink]]` opens the linked note; the addon registers its
+own `GoToDefinition` handler (Thock-registered editor actions run before the built-in and propagate
+when the cursor isn't on a wikilink, so code-style definitions are untouched). Targets resolve
+against the worktree snapshot — an exact vault-relative path (as written or with `.md` appended)
+wins, otherwise the first file the bare name reaches, Obsidian-style: a stem matches notes (`.md`)
+only, while any other file needs its extension written out (`[[scan.pdf]]`) — with no disk IO and
+no file creation for unresolved targets. *Click* navigation stays deferred exactly as §3/§10.6 say.
+
+Two more constructs joined the conceal set afterwards, both on the existing machinery (2026-08-19):
+**task checkboxes** (`- [ ]` / `- [x]` draw as a real checkbox, §7.4) and **single-line HTML
+comments** (`<!-- … -->` disappears entirely). Comments matter because Thock itself writes them —
+the Gmail capture's `<!--gmail:…-->` markers (V9) live at the end of backlog lines, and the Backlog
+panel already hides them in its rows; the editor now agrees. Both honour the reveal rule and every
+exclusion (C1–C3), and comments became an exclusion zone of their own (C8).
