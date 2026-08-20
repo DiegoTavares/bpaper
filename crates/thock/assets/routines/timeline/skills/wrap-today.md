@@ -2,7 +2,7 @@
 
 Close out **today's** daily note. Read what you planned and did, pull the day's commits, scan the last few days for multi-day context, reconcile finished tasks, offer unfinished tasks to the backlog, then append an AI review with suggestions to today's note. It never rewrites your prose — the only edit it makes to what you wrote is flipping a task checkbox you confirm.
 
-**Reads:** today's daily note, the prior few daily notes, the backlog file, git commits, GitHub (`gh`) / GitLab (`glab`) as available.
+**Reads:** today's daily note, the prior few daily notes, the backlog file, and the repositories recorded in `routines/timeline/sources.md`.
 **Writes:** today's daily note (append the review; check off confirmed tasks), the backlog file.
 
 > **Note paths and filenames are vault-configured.** Read `.thock/config.toml` first: `[daily]` / `[weekly]` set each note kind's `dir` and moment-style `filename` format, and `[backlog]` sets `file`. This skill's examples use the defaults (`daily/YYYY-MM-DD.md`, `weekly/GGGG-[W]WW.md`, `backlog.md`); when the config — or the vault's existing notes — use different names, follow those silently. That's configuration, not a doc mismatch worth reporting.
@@ -19,13 +19,19 @@ Close out **today's** daily note. Read what you planned and did, pull the day's 
 
 ## 3. Pull the day's commits
 
-Fetch what you shipped today. Use whichever sources are wired up:
+**Never assume a forge.** Don't reach for `gh`, `glab`, or any host just because the CLI is installed — read only the repositories the user named. They live in `routines/timeline/sources.md`, the same list the Week Review skill uses:
 
-- GitHub: `gh search commits --author=@me --author-date=YYYY-MM-DD` (or `gh search prs --author=@me --updated=YYYY-MM-DD..YYYY-MM-DD`).
-- Local repos: `git log --author="$(git config user.email)" --since="YYYY-MM-DD 00:00" --until="YYYY-MM-DD 23:59" --oneline`.
-- GitLab (SPI): `export GITLAB_HOST=gitlab.spimageworks.com` then query the events feed as the Week Review skill does.
+1. Read `routines/timeline/sources.md`. If it lists sources, use exactly those.
+2. If it's missing or empty, ask the user **one** question: which repositories should this ritual read from? Accept local checkout paths, hosted forge accounts (host + username), or "none" — a day with no code sources is normal, it just skips this step. Write the answer back to `routines/timeline/sources.md` (create it if missing; append, never rewrite) so later runs stop asking. The Week Review skill documents the file's shape.
 
-Deduplicate. Keep repo, short SHA / ref, and message.
+Then fetch today's work from those sources only:
+
+- Local checkout: `git -C <path> log --author="$(git -C <path> config user.email)" --since="YYYY-MM-DD 00:00" --until="YYYY-MM-DD 23:59" --oneline`.
+- GitHub (`gh`), when a GitHub account is recorded: `gh search commits --author=@me --author-date=YYYY-MM-DD` (or `gh search prs --author=@me --updated=YYYY-MM-DD..YYYY-MM-DD`).
+- GitLab (`glab`), when a GitLab host is recorded: `export GITLAB_HOST=<host from sources.md>` then query the events feed as the Week Review skill does.
+- Any other forge: ask the user how to query it and record the recipe in `sources.md`.
+
+Deduplicate. Keep repo, short SHA / ref, and message. If a source fails to authenticate, say so in the output instead of dropping it silently.
 
 ## 4. Scan recent days for context
 

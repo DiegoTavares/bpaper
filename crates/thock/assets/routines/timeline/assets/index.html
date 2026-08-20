@@ -382,32 +382,21 @@
   const PROJ_COLORS = ["#5eb0ef","#b58ef0","#4ec97a","#e5b454","#e06c75","#56c8d8","#d98cc4","#9db35e","#e08f5a","#7f9cf5"];
   const $ = id => document.getElementById(id);
 
-  // Ref → web URL resolution. Refs look like "OpenCue#2486" (GitHub, "#")
-  // or "argocd!57" (GitLab MR, "!"). Repo short-names map to full paths below;
-  // add a row here when a new repo shows up in the data.
-  const GH_REPO = {
-    OpenCue: "AcademySoftwareFoundation/OpenCue",
-    reader: "DiegoTavares/reader",
-    "faire-sync": "DiegoTavares/faire-sync"
-  };
-  const GL_HOST = "https://gitlab.spimageworks.com";
-  const GL_PATH = {
-    argocd: "spi/dev/infrastructure/api/opencue_group/argocd",
-    shottree3: "spi/dev/infrastructure/api/shottree3",
-    opencue_spi: "spi/dev/infrastructure/api/opencue_group/opencue_spi",
-    OpenCue: "spi/dev/infrastructure/api/opencue_group/OpenCue",
-    "spi-centos": "spi/dev/infrastructure/api/docker/spi-centos",
-    "sbt-zeroc-ice": "spi/dev/infrastructure/api/sbt-zeroc-ice",
-    "scala-ice-server": "spi/dev/infrastructure/api/scala-ice-server",
-    "k8s-config": "spi/systems/k8s-config",
-    "middle-tier-server": "spi/dev/infrastructure/api/vnp3/middle-tier-server",
-    vfo: "spi/dev/infrastructure/api/vfo"
-  };
+  // Ref → web URL resolution. Refs look like "webapp#2486" (GitHub, "#")
+  // or "platform-api!57" (GitLab MR, "!"). The repo short-name → full path
+  // maps live in data.js as `window.REPOS`, so this page ships with no
+  // repositories of its own; an unmapped ref renders as plain text.
+  const REPOS = window.REPOS || {};
+  const GH_REPO = REPOS.github || {};
+  const GL_HOST = (REPOS.gitlab && REPOS.gitlab.host) || null;
+  const GL_PATH = (REPOS.gitlab && REPOS.gitlab.paths) || {};
   function refUrl(p) {
     if ((p.src || "github") === "gitlab") {
+      if (!GL_HOST) return null;
       const [name, num] = p.ref.split("!");
       const path = GL_PATH[name];
-      return path && num ? `${GL_HOST}/${path}/-/merge_requests/${num}` : null;
+      const host = /^https?:\/\//.test(GL_HOST) ? GL_HOST : `https://${GL_HOST}`;
+      return path && num ? `${host}/${path}/-/merge_requests/${num}` : null;
     }
     const [name, num] = p.ref.split("#");
     const repo = GH_REPO[name];
@@ -419,20 +408,15 @@
   const allGoals = w => [...w.goals, ...w.tentative, ...w.personal];
 
   // Canonical project names, so lingering detection survives naming drift
-  // ("st3 / Infrastructure" vs "ST3 / ShotTree3"). First match wins.
-  const CANON = [
-    [/shottree|st3/i, "ST3"],
-    [/scheduler/i, "Scheduler"],
-    [/cuebot/i, "Cuebot"],
-    [/qlite|opencue.?lite/i, "Qlite"],
-    [/web team|shotgun/i, "Web Team"],
-    [/bom/i, "BOM"],
-    [/cueweb/i, "CueWeb"],
-    [/governance/i, "Governance"],
-    [/team|people/i, "Team"],
-    [/vfo/i, "VFO"],
-    [/personal|finance|faire/i, "Personal"]
-  ];
+  // ("api / Infrastructure" vs "API / Platform API"). Defined in data.js as
+  // `window.PROJECT_ALIASES` — [pattern, canonical name] pairs, matched
+  // case-insensitively, first match wins. Empty by default: names pass
+  // through unchanged until you add your own.
+  // The Personal / Team buckets are built in because LINGER_EXEMPT below
+  // keys off their canonical names.
+  const CANON = (window.PROJECT_ALIASES || [])
+    .map(([pattern, name]) => [pattern instanceof RegExp ? pattern : new RegExp(pattern, "i"), name])
+    .concat([[/personal|finance/i, "Personal"], [/team|people/i, "Team"]]);
   const canon = name => { for (const [re, c] of CANON) if (re.test(name)) return c; return name; };
   const normGoal = t => t.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
   const ord = n => n + (["th","st","nd","rd"][n % 10 > 3 || Math.floor(n / 10) === 1 ? 0 : n % 10]);
@@ -653,7 +637,7 @@
           <span><i style="background:var(--accent)"></i>reviewed (${revd})</span>
         </div>
         <div class="srcsplit">
-          <span><b>${gh}</b> GitHub</span><span><b>${gl}</b> GitLab (SPI)</span>
+          <span><b>${gh}</b> GitHub</span><span><b>${gl}</b> GitLab</span>
         </div>`;
       const badge = p => `<span class="src ${p.src || "github"}">${(p.src || "github") === "gitlab" ? "GL" : "GH"}</span>`;
       const draftTag = p => p.draft ? `<span class="draft">draft</span>` : "";

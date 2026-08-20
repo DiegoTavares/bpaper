@@ -242,7 +242,7 @@ As in §5.2 (`id = "timeline"`), with one skill (`week-review`), a `dashboard` s
 Ported from the author's working `.claude/commands/week-review.md` (reference vault). Its behavior, verbatim in intent:
 - Reviews **Mon–Sun of the prior week**; locates the weekly file in `weekly/` by ISO week (`YYYY-Www.md`, e.g. `2026-W30.md`), computed from the week's Monday — realigned from the reference vault's `_weekly/YYYY_WW_Mon.md` to the layout the Area actually scaffolds.
 - Reads the week's daily notes from `daily/` (`YYYY-MM-DD.md`); folds in `# Week Goals` / `# Tentative` / `# Personal`.
-- Collects GitHub PRs (`gh search prs …`) and GitLab MRs (`glab api …`, host `gitlab.spimageworks.com`), dedups.
+- Collects PRs/MRs from the repositories the user records in `routines/timeline/sources.md` (`gh search prs …`, `glab api …` against the recorded host), dedups.
 - Groups work by project, sets the `goal` flag, picks 2–3 highlights.
 - **Appends** (never overwrites) a `# AI Week Review` section to the weekly `.md`.
 - **Appends one week object** to `window.WEEKS` in `weekly/site/data.js` (schema fixed by the dashboard), then verifies the file still parses.

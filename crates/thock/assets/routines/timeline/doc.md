@@ -42,7 +42,8 @@ run button, use `thock: run skill` from the palette, or invoke them as
 slash commands inside an agent conversation:
 
 - **Wrap Today** (`/wrap-today`) — close out today's note: tasks, the day's
-  commits, recent context, then an appended `# Daily Closure` review.
+  commits (from the repositories you name — see `sources.md` below), recent
+  context, then an appended `# Daily Closure` review.
 - **Wrap Yesterday** (`/wrap-yesterday`) — the same closure for yesterday,
   for when the day got away from you.
 - **Week Review** (`/week-review`) — aggregate the week's notes and your
@@ -90,6 +91,9 @@ Everything is a plain file:
 - `templates/daily.md`, `templates/weekly.md` — what new notes start from.
 - `routines/timeline/skills/*.md` — the rituals themselves. Edit one and the
   next run honors your edit; the agent always reads the live file.
+- `routines/timeline/sources.md` — the repositories the wrap and review skills
+  read from. The skills ask once and record your answer here; edit the list
+  and they follow it. Nothing is queried unless it's on this list.
 - `.thock/config.toml` — where notes live, how they're named, and this
   vault's agent command override.
 

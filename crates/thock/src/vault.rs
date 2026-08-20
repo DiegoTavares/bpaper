@@ -26,10 +26,13 @@ template = "templates/weekly.md"
 [backlog]
 file = "backlog.md"          # the Soon / Someday / Completed holding pen
 
+# [markdown]
+# conceal = true             # hide markup while the cursor is off the line
+
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 6
+version = 7
 "#;
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
@@ -798,7 +801,7 @@ mod tests {
         assert_eq!(vault.config.history, VaultConfig::default().history);
         assert_eq!(
             vault.config.routines.installed,
-            vec![InstalledRoutine::new("timeline".to_string(), true, 6)]
+            vec![InstalledRoutine::new("timeline".to_string(), true, 7)]
         );
         assert!(dir.path().join("daily").is_dir());
         assert!(dir.path().join("weekly").is_dir());

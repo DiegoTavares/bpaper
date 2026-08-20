@@ -1,8 +1,8 @@
 # Week Review
 
-Review the previous week's daily notes, GitHub activity, and GitLab (SPI) activity, then produce a summary organized by project, write it to the weekly markdown file, and append a structured entry to the dashboard data (`weekly/site/data.js`).
+Review the previous week's daily notes and the code activity from the repositories the user names, then produce a summary organized by project, write it to the weekly markdown file, and append a structured entry to the dashboard data (`weekly/site/data.js`).
 
-**Reads:** the daily and weekly notes, the backlog file, GitHub (`gh`), GitLab (`glab`).
+**Reads:** the daily and weekly notes, the backlog file, and the repositories recorded in `routines/timeline/sources.md`.
 **Writes (append-only):** the weekly `.md` file, `weekly/site/data.js`, the backlog file.
 
 > **Note paths and filenames are vault-configured.** Read `.thock/config.toml` first: `[daily]` / `[weekly]` set each note kind's `dir` and moment-style `filename` format, and `[backlog]` sets `file`. This skill's examples use the defaults (`daily/YYYY-MM-DD.md`, `weekly/GGGG-[W]WW.md`, `backlog.md`); when the config — or the vault's existing notes — use different names, follow those silently. That's configuration, not a doc mismatch worth reporting.
@@ -19,44 +19,76 @@ Review the previous week's daily notes, GitHub activity, and GitLab (SPI) activi
 2. Read each one. Extract tasks and activities from day-planner sections, conversation notes, and anything else relevant.
 3. If a weekly note already exists, read it and fold in its `# Week Goals`, `# Tentative`, and `# Personal` sections (these become the goals in the dashboard) plus any context.
 
-## 3. Collect GitHub PRs (`gh`)
+## 3. Ask which repositories to review
 
-Fetch everything you touched in the range:
+**Never assume a forge.** Don't reach for `gh`, `glab`, or any host just because the CLI is installed — read only what the user told you to read. The answer lives in `routines/timeline/sources.md`:
+
+1. Read `routines/timeline/sources.md`. If it lists sources, use exactly those and don't ask again.
+2. If it's missing or empty, ask the user **one** question: which repositories should this review read from? Accept local checkout paths, hosted forge accounts (host + username), or "none" — a week with no code sources is normal, it just skips step 4.
+3. Write the answer back to `routines/timeline/sources.md` (create it if missing; append, never rewrite) so later runs stop asking. Ask again only when the user says the list is stale or a call reveals a source that no longer exists.
+
+The file is plain markdown the user can edit at any time:
+
+```markdown
+# Timeline Sources
+
+Repositories the Wrap and Week Review skills read from. Edit freely.
+
+## Local checkouts
+- ~/dev/webapp
+- ~/dev/platform-api
+
+## Forges
+- github.com — user: <login> (`gh`)
+- gitlab.example.com — user: <login>, id: <numeric id> (`glab`)
+```
+
+## 4. Collect the week's pull and merge requests
+
+Query only the sources from step 3. Each entry ends up with a repo, number, title, and status (open / merged / closed; reviewed when the user reviewed it rather than authored it). Deduplicate across sources. If a call fails with an auth error, say so in the output and tell the user which login to re-run (`gh auth login`, `glab auth login --hostname <host>`) — never drop a source silently.
+
+**Local checkouts** — commits that never became a PR still count:
+```bash
+git -C <path> log --author="$(git -C <path> config user.email)" \
+  --since=YYYY-MM-DD --until=YYYY-MM-DD --oneline
+```
+
+**GitHub (`gh`)** — only when a GitHub account is recorded:
 - Created: `gh search prs --author=@me --created=YYYY-MM-DD..YYYY-MM-DD`
 - Reviewed: `gh search prs --reviewed-by=@me --updated=YYYY-MM-DD..YYYY-MM-DD`
 - Merged: `gh search prs --author=@me --merged=YYYY-MM-DD..YYYY-MM-DD`
 
-Deduplicate. Each PR has a repo, number, title, and status (open/merged; reviewed if you reviewed it).
+Narrow with `--owner <org>` or `repo:<owner>/<name>` when the user named specific repositories rather than a whole account.
 
-## 4. Collect GitLab MRs (`glab`) — SPI internal
-
-Your SPI work lives on `gitlab.spimageworks.com` and is a large share of real output (deploys, releases, fixes) that GitHub does not see. One-time setup (already done on this machine): `glab` is installed and authenticated as **dtavares** (user id **163**). If a call fails with auth errors, re-run `glab auth login --hostname gitlab.spimageworks.com` (needs a `read_api` PAT).
-
-Always prefix calls with the host:
+**GitLab (`glab`)** — only when a GitLab host is recorded. Always prefix calls with that host:
 
 ```bash
-export GITLAB_HOST=gitlab.spimageworks.com
+export GITLAB_HOST=<host from sources.md>
 ```
+
+The events query below needs the numeric user id — `glab api user | jq .id` once, then record it in `sources.md` so you don't look it up every week.
 
 For a single week the counts are small, so one page (`per_page=100`) is enough — no pagination needed. (Only for multi-week backfills does `glab api --paginate` matter, and it concatenates one JSON array per page; merge with `jq -s 'add'`.)
 
 **Authored MRs** (→ `created`), created in the window:
 ```bash
-glab api "merge_requests?scope=all&author_username=dtavares&created_after=YYYY-MM-DDT00:00:00Z&created_before=YYYY-MM-DDT00:00:00Z&per_page=100"
+glab api "merge_requests?scope=all&author_username=<username>&created_after=YYYY-MM-DDT00:00:00Z&created_before=YYYY-MM-DDT00:00:00Z&per_page=100"
 ```
-Map each: `ref` = `<project-path-tail>!<iid>` (e.g. `shottree3!265`), `title`, `status` = `merged`/`open`/`closed` (GitLab `merged`→`merged`, `opened`→`open`, `closed`→`closed`). Mark `draft: true` when the title starts with `Draft:`/`[Draft]`/`WIP:`.
+Map each: `ref` = `<project-path-tail>!<iid>` (e.g. `platform-api!265`), `title`, `status` = `merged`/`open`/`closed` (GitLab `merged`→`merged`, `opened`→`open`, `closed`→`closed`). Mark `draft: true` when the title starts with `Draft:`/`[Draft]`/`WIP:`.
 
-**Reviewed MRs** (→ `reviewed`): do **not** use `reviewer_username` — it returns MRs merely touched in the window and is noisy. Use real review actions from your events feed:
+**Reviewed MRs** (→ `reviewed`): do **not** use `reviewer_username` — it returns MRs merely touched in the window and is noisy. Use real review actions from the events feed:
 ```bash
-glab api "users/163/events?after=YYYY-MM-DD&before=YYYY-MM-DD&per_page=100"
+glab api "users/<user id>/events?after=YYYY-MM-DD&before=YYYY-MM-DD&per_page=100"
 ```
-Take events with `action_name: "approved"` and `target_type: "MergeRequest"` (optionally also `commented on` a `MergeRequest`/`DiffNote` on someone else's MR). Resolve the project path via `glab api "projects/<project_id>"` (field `path`) to build the `ref`. GitLab reviews are typically sparse — that is expected; your review volume is mostly on GitHub.
+Take events with `action_name: "approved"` and `target_type: "MergeRequest"` (optionally also `commented on` a `MergeRequest`/`DiffNote` on someone else's MR). Resolve the project path via `glab api "projects/<project_id>"` (field `path`) to build the `ref`.
 
-Note: `action_name: "accepted"` means you merged an MR (counts toward `merged` on MRs you authored); `"opened"` means you authored it. Use these to sanity-check the authored list.
+Note: `action_name: "accepted"` means the user merged an MR (counts toward `merged` on MRs they authored); `"opened"` means they authored it. Use these to sanity-check the authored list.
+
+**Any other forge** — if `sources.md` names a host with no CLI recipe here, ask the user how to query it (a CLI, an API token, or "skip it"), and add the recipe to `sources.md` for next time.
 
 ## 5. Organize the content
 
-1. **Group tasks by project.** Infer short, consistent project names (Scheduler, Cuebot, ST3, Qlite, BOM, VFO, CueWeb, Team / People, Personal / Finance, etc.). Only include what was actually worked on — no padding.
+1. **Group tasks by project.** Infer short, consistent project names from the notes and repositories themselves (e.g. Web App, Platform API, Infrastructure, Team / People, Personal / Finance). Reuse the names earlier weeks already used. Only include what was actually worked on — no padding.
 2. **Set the `goal: true` flag** on any project that served a `# Week Goals` item that week. This is the one judgment call the dashboard cannot make itself — it drives the "time sink" warning (share of work outside your goals). Leave it off for projects that were not goals. Never flag `Personal` or `Team` as lingering-exempt yourself; the page handles that.
 3. **Pick 2–3 highlights** — the week's most notable accomplishments, in your own words. For an unfinished in-progress week, leave highlights empty.
 
@@ -83,12 +115,12 @@ Append (never overwrite) a `# AI Week Review` section at the end of the weekly f
 - Another task
 
 ### Pull & Merge Requests
-- **OpenCue#2425** - [scheduler] Add end-to-end stress tests (created, open) [GitHub]
-- **shottree3!265** - Optimize st3-metadata search query (created, merged) [GitLab]
-- **spi-centos!18** - Add en_US locale to SPI 9.5 image (reviewed) [GitLab]
+- **webapp#2425** - [search] Add end-to-end stress tests (created, open) [GitHub]
+- **platform-api!265** - Optimize metadata search query (created, merged) [GitLab]
+- **base-image!18** - Add en_US locale to the base image (reviewed) [GitLab]
 ```
 
-Keep it short and factual. Tag each PR/MR with `[GitHub]` or `[GitLab]`. No commentary unless asked.
+Keep it short and factual. Tag each PR/MR with the forge it came from (`[GitHub]`, `[GitLab]`, or whatever `sources.md` names). No commentary unless asked.
 
 ## 8. Append to the dashboard (`weekly/site/data.js`)
 
@@ -108,18 +140,18 @@ Schema (match this exactly):
   personal:  [ { text: "…", done: false } ],  // from # Personal (or [])
   highlights: [ "…", "…" ],          // 2–3, or [] for an in-progress week
   projects: [
-    { name: "Scheduler", goal: true, tasks: [ "task one", "task two" ] },
+    { name: "Web App", goal: true, tasks: [ "task one", "task two" ] },
     { name: "Personal / Finance", tasks: [ "…" ] }   // omit `goal` when not a week goal
   ],
   prs: {
     created: [
-      { ref: "OpenCue#2425", title: "[scheduler] Add end-to-end stress tests", status: "open",   src: "github" },
-      { ref: "shottree3!265", title: "Optimize st3-metadata search query",     status: "merged", src: "gitlab" },
-      { ref: "shottree3!263", title: "Draft: Upgrade to Java 21", status: "open", src: "gitlab", draft: true }
+      { ref: "webapp#2425", title: "[search] Add end-to-end stress tests", status: "open",   src: "github" },
+      { ref: "platform-api!265", title: "Optimize metadata search query",  status: "merged", src: "gitlab" },
+      { ref: "platform-api!263", title: "Draft: Upgrade to Java 21", status: "open", src: "gitlab", draft: true }
     ],
     reviewed: [
-      { ref: "OpenCue#2410", title: "[cueweb/docs] Add Allocations page", src: "github" },
-      { ref: "spi-centos!18", title: "Add en_US locale to SPI 9.5 image",  src: "gitlab" }
+      { ref: "webapp#2410", title: "[docs] Add the settings page", src: "github" },
+      { ref: "base-image!18", title: "Add en_US locale to the base image", src: "gitlab" }
     ]
   }
 }
@@ -127,6 +159,7 @@ Schema (match this exactly):
 
 Rules:
 - Put **every** PR/MR in `prs.created` or `prs.reviewed` with an explicit `src: "github"` or `src: "gitlab"`. `status` applies to `created` entries only.
+- For a ref to become a clickable link, its repo short-name must be mapped in `window.REPOS` in `data.js` (`github: { "<short-name>": "<owner>/<repo>" }`, `gitlab: { host: "<host>", paths: { "<short-name>": "<full/project/path>" } }`). Add a row the first time a repository shows up — the same repositories `sources.md` lists. Unmapped refs still render, just as plain text.
 - The dashboard computes stats, sparklines, and warnings from this data. It infers **lingering projects** and **carried-over goals** across weeks automatically — you only need accurate `projects` (with `goal` flags), `tasks`, `goals`, and `prs`. Keep project names stable across weeks so lingering detection works (the page canonicalizes common variants, but consistency helps).
 - After editing, verify the file still parses: `node -e "global.window={};require('./weekly/site/data.js');console.log(window.WEEKS.length,'weeks')"`.
 
